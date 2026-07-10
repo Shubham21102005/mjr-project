@@ -2,10 +2,15 @@
 Evaluate panic detection against UCSD Ped1 ground truth.
 
 Usage:
-    python evaluate.py --dataset "C:/Users/shubh/Downloads/UCSD_Anomaly_Dataset.tar/UCSD_Anomaly_Dataset/UCSD_Anomaly_Dataset.v1p2/UCSDped1/Test"
+    python evaluate.py --dataset datasets/UCSD_Anomaly_Dataset.v1p2/UCSDped1/Test
 
 Prints per-clip and overall: precision, recall, F1, accuracy.
 A frame is ground-truth anomalous if any pixel in its _gt mask is non-zero.
+
+NOTE: UCSD "anomalies" are non-pedestrian objects (bikes, carts, skaters), not
+crowd panic, so this is a mismatched benchmark for a panic detector — expect low
+recall. It is here to (a) run the pipeline on real ground-truth data and (b) give
+a reproducible numeric baseline. UMN is the correct dataset for panic specifically.
 """
 
 import argparse
@@ -101,7 +106,8 @@ def print_metrics(label, tp, fp, tn, fn):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str,
-        default=r"C:\Users\shubh\Downloads\UCSD_Anomaly_Dataset.tar\UCSD_Anomaly_Dataset\UCSD_Anomaly_Dataset.v1p2\UCSDped1\Test")
+        default="datasets/UCSD_Anomaly_Dataset.v1p2/UCSDped1/Test",
+        help="Path to UCSDped1/Test (holds TestNNN clip dirs and TestNNN_gt mask dirs)")
     parser.add_argument("--model", type=str, default="yolov8n.pt")
     parser.add_argument("--flow-scale", type=float, default=0.5)
     parser.add_argument("--conf", type=float, default=0.4)

@@ -77,9 +77,9 @@ def draw_hud(frame, boxes, flow, metrics, label, panic_ratio, flow_scale, debug_
     text_color = (210, 210, 210)
     y0, dy = 82, 19
     lines = [
-        f"Avg Speed:    {metrics.get('avg_speed', 0):.2f} px/f",
+        f"Avg Speed:    {metrics.get('avg_speed', 0):.2f} %diag/f",
         f"Dir Variance: {metrics.get('direction_variance', 0):.2f} rad",
-        f"Density:      {metrics.get('crowd_density', 0):.6f}",
+        f"Occupancy:    {metrics.get('crowd_density', 0):.3f}",
         f"Flow Entropy: {metrics.get('flow_entropy', 0):.2f} / 3.58",
         f"Panic Ratio:  {panic_ratio:.2f}",
         f"Persons:      {metrics.get('person_count', 0)}",

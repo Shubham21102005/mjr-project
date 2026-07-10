@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crowd Panic Detection — Live</title>
+<style>
+  :root { --bg:#0e1117; --panel:#161b22; --line:#232a34; --txt:#e6edf3; --muted:#8b949e;
+          --ok:#2ea043; --panic:#f85149; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--txt); }
+  header { padding:16px 22px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:14px; }
+  header h1 { font-size:18px; margin:0; font-weight:600; }
+  header .dot { width:9px; height:9px; border-radius:50%; background:var(--ok); box-shadow:0 0 8px var(--ok); }
+  header .sub { color:var(--muted); font-size:13px; }
+  #grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(360px,1fr)); gap:18px; padding:22px; }
+  .cam { background:var(--panel); border:1px solid var(--line); border-radius:12px; overflow:hidden; transition:box-shadow .2s,border-color .2s; }
+  .cam.panic { border-color:var(--panic); box-shadow:0 0 0 2px var(--panic), 0 0 24px rgba(248,81,73,.5); animation:pulse 1s infinite; }
+  @keyframes pulse { 50% { box-shadow:0 0 0 2px var(--panic), 0 0 8px rgba(248,81,73,.3); } }
+  .cam .bar { display:flex; align-items:center; justify-content:space-between; padding:10px 14px; border-bottom:1px solid var(--line); }
+  .cam .name { font-weight:600; }
+  .badge { font-size:12px; font-weight:700; padding:4px 10px; border-radius:20px; background:var(--ok); color:#04210d; letter-spacing:.5px; }
+  .badge.panic { background:var(--panic); color:#2b0606; }
+  .cam img { width:100%; display:block; background:#000; aspect-ratio:16/10; object-fit:contain; }
+  .meta { padding:12px 14px; }
+  .row { display:flex; justify-content:space-between; font-size:13px; padding:3px 0; color:var(--muted); }
+  .row b { color:var(--txt); font-variant-numeric:tabular-nums; font-weight:500; }
+  .tag { font-size:11px; color:var(--muted); }
+  footer { color:var(--muted); font-size:12px; padding:0 22px 24px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot"></span>
+  <h1>Crowd Panic Detection</h1>
+  <span class="sub">live monitoring dashboard · alerts on panic</span>
+  <span class="sub" id="muteWrap" style="margin-left:auto;">
+    <label><input type="checkbox" id="mute"> mute alarm</label>
+  </span>
+</header>
+<div id="grid"></div>
+<footer>Feeds stream as MJPEG; labels &amp; metrics arrive over WebSocket. A tile turns red and sounds an alarm while its feed is in PANIC.</footer>
+
+<script>
+let audioCtx = null;
+function beep() {
+  if (document.getElementById('mute').checked) return;
+  audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+  const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+  o.type = 'square'; o.frequency.value = 880;
+  o.connect(g); g.connect(audioCtx.destination);
+  g.gain.setValueAtTime(0.12, audioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.35);
+  o.start(); o.stop(audioCtx.currentTime + 0.35);
+}
+
+function tile(room) {
+  const el = document.createElement('div');
+  el.className = 'cam'; el.id = 'cam-' + room;
+  el.innerHTML = `
+    <div class="bar"><span class="name">📷 ${room}</span>
+      <span class="badge" id="badge-${room}">NORMAL</span></div>
+    <img src="/video/${room}" alt="${room} feed">
+    <div class="meta">
+      <div class="row"><span>Avg Speed</span><b id="spd-${room}">—</b></div>
+      <div class="row"><span>Flow Entropy</span><b id="ent-${room}">—</b></div>
+      <div class="row"><span>Dir Variance</span><b id="dir-${room}">—</b></div>
+      <div class="row"><span>Occupancy</span><b id="occ-${room}">—</b></div>
+      <div class="row"><span>Persons</span><b id="ppl-${room}">—</b></div>
+      <div class="row"><span>Panic Ratio</span><b id="pr-${room}">—</b></div>
+      <div class="row"><span class="tag">decision backend</span><span class="tag" id="be-${room}">—</span></div>
+    </div>`;
+  return el;
+}
+
+function connect(room) {
+  const ws = new WebSocket(`ws://${location.host}/ws/${room}`);
+  ws.onmessage = (ev) => {
+    const s = JSON.parse(ev.data), m = s.metrics || {};
+    const panic = s.label === 'PANIC';
+    const badge = document.getElementById('badge-' + room);
+    const cam = document.getElementById('cam-' + room);
+    badge.textContent = s.label; badge.classList.toggle('panic', panic);
+    cam.classList.toggle('panic', panic);
+    const set = (id, v) => document.getElementById(id + '-' + room).textContent = v;
+    set('spd', (m.avg_speed ?? 0).toFixed(2) + ' %diag/f');
+    set('ent', (m.flow_entropy ?? 0).toFixed(2) + ' / 3.58');
+    set('dir', (m.direction_variance ?? 0).toFixed(2));
+    set('occ', (m.crowd_density ?? 0).toFixed(3));
+    set('ppl', m.person_count ?? 0);
+    set('pr', (s.panic_ratio ?? 0).toFixed(2));
+    set('be', s.backend);
+    if (panic) beep();
+  };
+  ws.onclose = () => setTimeout(() => connect(room), 1500);
+}
+
+fetch('/rooms').then(r => r.json()).then(d => {
+  const grid = document.getElementById('grid');
+  d.rooms.forEach(room => { grid.appendChild(tile(room)); connect(room); });
+});
+</script>
+</body>
+</html>
