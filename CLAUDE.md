@@ -60,6 +60,23 @@ CLI, the server, clip analysis, training, and evaluation:
   `PanicClassifier` records `load_error`, exposes `degraded`, and prints a loud
   warning; the dashboard surfaces it. Don't reduce that back to a silent
   fallback.
+- **One pipeline, two ways to feed it.** `RoomBase.process(frame)` in `server.py`
+  is the only implementation of the live pipeline; `PullRoom` (server opens a file
+  or webcam index) and `PushRoom` (browser pushes JPEGs over `WS /ingest/{room}`)
+  differ only in where frames come from. Don't fork `process()`.
+- **Pushed frames drop, never queue.** `PushRoom.submit()` overwrites a single
+  `pending` slot. The pipeline runs ~15 fps on CPU; queueing a faster sender would
+  make the annotated view drift further behind real time every second. Dropping the
+  stale frame bounds latency and just lowers the effective rate.
+- **`/video/{room}` must stay an ASYNC generator.** As a sync generator it was
+  iterated through Starlette's threadpool ~25x/sec per viewer, which starved the
+  event loop badly enough that an ingest socket missed its keepalive pongs and the
+  server killed the upload mid-stream. It also only emits when `latest_jpeg`
+  actually changed. Don't revert either property.
+- **Room-scoped endpoints must re-resolve the room each iteration.** `/video/{room}`
+  and `/ws/{room}` used to bind `WORKERS.get(room)` once at connect; a push room
+  usually does not exist yet when a page first asks for it, so the connection stayed
+  dead forever. Look the room up inside the loop.
 - **Annotated video must be browser-playable.** Result clips go through
   `video_writer.py`, which pipes frames to system ffmpeg (`libx264`, `yuv420p`,
   `+faststart`). OpenCV's H.264 writer is unreliable (openh264 DLL is commonly
@@ -77,6 +94,8 @@ Install: `PY -m pip install -r requirements.txt`.
 ```bash
 # Web dashboard. Then open http://localhost:8000
 PY -m uvicorn server:app --host 127.0.0.1 --port 8000
+#   /          upload a clip + watch live feeds
+#   /camera    stream THIS device's camera into a room and run the model on it
 
 # ...with live rooms (opt-in; empty by default). Windows PowerShell:
 #   $env:PANIC_SOURCES="lobby=demo_crowd_30s.avi,webcam=0"
@@ -113,7 +132,7 @@ PY visualize.py --clip panic_test.avi --out viz/panic.mp4
 |---|---|
 | Core pipeline | `metrics.py`, `classifier.py`, `baseline.py` (scene-relative scoring) |
 | CLI viewer | `detect.py` (owns `extract_boxes` + `draw_hud`, reused by server/analyze) |
-| Web app | `server.py` (FastAPI: upload jobs + one worker thread per live room, MJPEG + WebSocket), `dashboard.html` |
+| Web app | `server.py` (FastAPI: upload jobs + one worker thread per live room, MJPEG + WebSocket), `dashboard.html`, `camera.html` (browser capture page) |
 | Clip analysis | `analyze.py` (offline pass over an upload), `video_writer.py` (ffmpeg/libx264) |
 | Training | `train_classifier.py`, `synth.py` (synthetic clip generator) |
 | Evaluation | `evaluate.py`, `visualize.py` (annotated debug renders), `umn_labels.py` (UMN per-frame ground truth) |
@@ -127,8 +146,25 @@ PY visualize.py --clip panic_test.avi --out viz/panic.mp4
   annotated MP4. One analysis at a time (`ANALYSIS_SEM`) — concurrent jobs would
   just make every progress bar lie. This is the demo path, since real panic can't
   be staged for a live camera.
-- **Live** (`GET /rooms`, `/video/{room}`, `WS /ws/{room}`). Opt-in via
-  `PANIC_SOURCES`; empty by default so there's no permanently dead tile.
+- **Live**, two kinds of room:
+  - *pull* — `PANIC_SOURCES` names files or webcam indices the server opens itself.
+    Opt-in and empty by default, so there is no permanently dead tile.
+  - *push* — a browser at `/camera` captures its own camera and pushes JPEGs over
+    `WS /ingest/{room}`. The room is created on first connect and reaped
+    `ROOM_IDLE_GRACE` (60s) after the last client leaves. That grace period is
+    load-bearing: tearing the room down on a page refresh would discard the scene
+    baseline and force another 90-frame warm-up.
+
+  Either kind is watched with `GET /rooms` (polled by the dashboard, so new rooms
+  appear without a reload), `/video/{room}` for annotated MJPEG and `WS /ws/{room}`
+  for labels and metrics. `POST /api/rooms/{room}/recalibrate` throws away a feed's
+  learned baseline — the escape hatch when warm-up happened while the scene was
+  already busy.
+
+  **`getUserMedia` needs a secure context.** `http://localhost` qualifies, so
+  own-camera use needs no TLS. A phone hitting `http://<lan-ip>:8000` does NOT, and
+  the camera fails *silently* rather than prompting — `camera.html` detects this and
+  says so. Serving over HTTPS is a prerequisite for the multi-device/QR phase.
 
 ## Known gaps / caveats
 

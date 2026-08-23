@@ -100,6 +100,30 @@ is analysed at a time.
 
 Accepts `.mp4 .avi .mov .mkv .webm .m4v .mpg .mpeg`, up to 512 MB.
 
+### Stream this device's camera
+
+Open <http://localhost:8000/camera>, pick a room name and hit **Start camera**. The
+page captures your camera, pushes JPEG frames to the server over a WebSocket, and the
+full pipeline runs on every frame. You get your raw preview plus (toggleable) the
+annotated stream the model sees — person boxes, live metrics and the NORMAL/PANIC
+label burned in — and the feed also shows up as a tile on the main dashboard
+automatically, no reload needed.
+
+Because detection is scene-relative, the camera first spends ~90 frames learning what
+*normal* looks like where it's pointed; the page shows that as a calibration bar. Hold
+still through it, then move fast and erratically to trip the detector. If warm-up
+happened while the scene was already busy, hit **Recalibrate** to re-learn.
+
+> **This only works on `localhost`.** Browsers only allow camera access in a secure
+> context. `http://localhost` counts, so your own machine is fine with no setup. A
+> phone pointed at `http://<your-lan-ip>:8000` does **not**, and the camera fails
+> silently rather than prompting — the page detects that and tells you. Serving over
+> HTTPS is what unlocks other devices.
+
+Frame rate and resolution are selectable (default 10 fps at 640x480). If the pipeline
+falls behind the sender, stale frames are dropped rather than queued, so latency stays
+bounded and only the effective frame rate drops.
+
 ### Monitor live feeds
 
 Live rooms are opt-in — set `PANIC_SOURCES` (comma-separated `name=source`,
@@ -116,14 +140,16 @@ Each room gets a tile in the grid streaming its annotated feed as MJPEG, with
 labels and metrics arriving over a WebSocket. A tile turns red and sounds an
 alarm while its feed is in PANIC.
 
-Note these rooms are **server-pulled** sources fixed at startup — a phone cannot
-join a room by ID and push its camera in. See "Not built yet" below.
+These rooms are **server-pulled** sources fixed at startup, in contrast to the
+browser-pushed rooms above.
 
 ### HTTP API
 
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/api/upload` | Upload a clip; returns a `job_id` |
+| `WS` | `/ingest/{room}` | Push camera frames in (binary JPEG); pushes state back |
+| `POST` | `/api/rooms/{room}/recalibrate` | Forget a feed's learned baseline |
 | `GET` | `/api/jobs/{id}` | Job status, progress, and the full result |
 | `GET` | `/api/jobs/{id}/video` | The annotated MP4 (supports Range requests) |
 | `DELETE` | `/api/jobs/{id}` | Drop a job and its files |
@@ -177,7 +203,7 @@ Reports precision / recall / F1 / accuracy against frame-level ground truth.
 |---|---|
 | Core pipeline | `metrics.py`, `classifier.py`, `baseline.py` |
 | CLI viewer | `detect.py` (owns `extract_boxes` + `draw_hud`, reused everywhere) |
-| Web app | `server.py` (FastAPI), `dashboard.html` |
+| Web app | `server.py` (FastAPI), `dashboard.html`, `camera.html` |
 | Clip analysis | `analyze.py`, `video_writer.py` (ffmpeg/libx264 encoding) |
 | Training | `train_classifier.py`, `synth.py` (synthetic clip generator) |
 | Evaluation | `evaluate.py`, `visualize.py`, `umn_labels.py` (UMN ground truth) |
@@ -215,9 +241,9 @@ Reports precision / recall / F1 / accuracy against frame-level ground truth.
 
 ## Not built yet
 
-- **Devices joining a room by ID.** Rooms are server-pulled sources configured at
-  startup; there is no ingest endpoint and the page never captures a camera, so a
-  phone can't push a feed into a shared room.
+- **Other devices joining a room by ID.** The ingest endpoint and capture page
+  exist and work, but only over `localhost` — HTTPS is required before a phone can
+  reach them, and there is no QR/join flow yet.
 - **Alert delivery.** The alarm is a beep in whichever browser has the dashboard
   open. Nothing is pushed to the camera device or anywhere else.
 
