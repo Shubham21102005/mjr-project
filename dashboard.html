@@ -3,18 +3,66 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Crowd Panic Detection — Live</title>
+<title>Crowd Panic Detection — Dashboard</title>
 <style>
   :root { --bg:#0e1117; --panel:#161b22; --line:#232a34; --txt:#e6edf3; --muted:#8b949e;
-          --ok:#2ea043; --panic:#f85149; }
+          --ok:#2ea043; --panic:#f85149; --accent:#388bfd; --warn:#d29922; }
   * { box-sizing:border-box; }
   body { margin:0; font-family:-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--txt); }
-  header { padding:16px 22px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:14px; }
+  header { padding:16px 22px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
   header h1 { font-size:18px; margin:0; font-weight:600; }
   header .dot { width:9px; height:9px; border-radius:50%; background:var(--ok); box-shadow:0 0 8px var(--ok); }
   header .sub { color:var(--muted); font-size:13px; }
-  #grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(360px,1fr)); gap:18px; padding:22px; }
-  .cam { background:var(--panel); border:1px solid var(--line); border-radius:12px; overflow:hidden; transition:box-shadow .2s,border-color .2s; }
+  main { padding:22px; max-width:1200px; margin:0 auto; }
+  h2 { font-size:15px; font-weight:600; margin:0 0 12px; letter-spacing:.3px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; margin-bottom:22px; }
+
+  /* ---- upload ---- */
+  #drop { border:2px dashed var(--line); border-radius:10px; padding:30px 20px; text-align:center;
+          transition:border-color .15s, background .15s; cursor:pointer; }
+  #drop.over { border-color:var(--accent); background:rgba(56,139,253,.07); }
+  #drop .big { font-size:15px; margin-bottom:6px; }
+  #drop .hint { color:var(--muted); font-size:12.5px; }
+  #file { display:none; }
+  .btn { background:var(--accent); color:#fff; border:0; border-radius:7px; padding:9px 18px;
+         font-size:13.5px; font-weight:600; cursor:pointer; }
+  .btn:disabled { opacity:.45; cursor:not-allowed; }
+  .btn.ghost { background:transparent; border:1px solid var(--line); color:var(--txt); }
+  .rowline { display:flex; align-items:center; gap:12px; margin-top:14px; flex-wrap:wrap; }
+  .fname { font-size:13px; color:var(--muted); }
+
+  .prog { height:8px; background:#0b0e13; border-radius:99px; overflow:hidden; margin-top:14px; }
+  .prog i { display:block; height:100%; width:0%; background:var(--accent); transition:width .25s; }
+  .progtxt { font-size:12.5px; color:var(--muted); margin-top:8px; font-variant-numeric:tabular-nums; }
+  .err { color:var(--panic); font-size:13px; margin-top:12px; }
+  .warnbox { color:var(--warn); font-size:12.5px; margin-top:10px; }
+
+  /* ---- result ---- */
+  .verdict { display:inline-flex; align-items:center; gap:8px; font-size:14px; font-weight:700;
+             padding:7px 14px; border-radius:20px; letter-spacing:.4px; }
+  .verdict.panic { background:var(--panic); color:#2b0606; }
+  .verdict.clear { background:var(--ok); color:#04210d; }
+  video { width:100%; max-height:70vh; object-fit:contain; border-radius:10px;
+          background:#000; display:block; margin-top:14px; }
+
+  .tlwrap { margin-top:16px; }
+  .tllabel { display:flex; justify-content:space-between; font-size:12px; color:var(--muted); margin-bottom:6px; }
+  #timeline { width:100%; height:72px; display:block; border-radius:8px; background:#0b0e13; cursor:pointer; }
+
+  .segs { margin-top:16px; display:flex; flex-wrap:wrap; gap:8px; }
+  .seg { background:rgba(248,81,73,.12); border:1px solid rgba(248,81,73,.45); color:#ffb4b0;
+         border-radius:7px; padding:7px 12px; font-size:12.5px; cursor:pointer; font-variant-numeric:tabular-nums; }
+  .seg:hover { background:rgba(248,81,73,.22); }
+  .noseg { color:var(--muted); font-size:13px; margin-top:14px; }
+
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:12px; margin-top:18px; }
+  .stat { background:#0b0e13; border:1px solid var(--line); border-radius:8px; padding:11px 13px; }
+  .stat .k { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+  .stat .v { font-size:16px; font-weight:600; margin-top:3px; font-variant-numeric:tabular-nums; }
+
+  /* ---- live ---- */
+  #grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(360px,1fr)); gap:18px; }
+  .cam { background:#0b0e13; border:1px solid var(--line); border-radius:12px; overflow:hidden; transition:box-shadow .2s,border-color .2s; }
   .cam.panic { border-color:var(--panic); box-shadow:0 0 0 2px var(--panic), 0 0 24px rgba(248,81,73,.5); animation:pulse 1s infinite; }
   @keyframes pulse { 50% { box-shadow:0 0 0 2px var(--panic), 0 0 8px rgba(248,81,73,.3); } }
   .cam .bar { display:flex; align-items:center; justify-content:space-between; padding:10px 14px; border-bottom:1px solid var(--line); }
@@ -26,31 +74,296 @@
   .row { display:flex; justify-content:space-between; font-size:13px; padding:3px 0; color:var(--muted); }
   .row b { color:var(--txt); font-variant-numeric:tabular-nums; font-weight:500; }
   .tag { font-size:11px; color:var(--muted); }
-  footer { color:var(--muted); font-size:12px; padding:0 22px 24px; }
+  .tag.bad { color:var(--panic); }
+  .empty { color:var(--muted); font-size:13px; }
 </style>
 </head>
 <body>
 <header>
   <span class="dot"></span>
   <h1>Crowd Panic Detection</h1>
-  <span class="sub">live monitoring dashboard · alerts on panic</span>
+  <span class="sub">upload a clip to analyse · live feeds monitored in real time</span>
   <span class="sub" id="muteWrap" style="margin-left:auto;">
     <label><input type="checkbox" id="mute"> mute alarm</label>
   </span>
 </header>
-<div id="grid"></div>
-<footer>Feeds stream as MJPEG; labels &amp; metrics arrive over WebSocket. A tile turns red and sounds an alarm while its feed is in PANIC.</footer>
+
+<main>
+  <section class="card">
+    <h2>Analyse a video clip</h2>
+    <div id="drop">
+      <div class="big">Drop a video here, or <span style="color:var(--accent)">browse</span></div>
+      <div class="hint">mp4 · avi · mov · mkv · webm — up to 512 MB. The detector runs over every frame and marks where the crowd panics.</div>
+      <input type="file" id="file" accept="video/*,.avi,.mkv,.mov,.mp4,.webm,.m4v,.mpg,.mpeg">
+    </div>
+    <div class="rowline">
+      <button class="btn" id="go" disabled>Analyse</button>
+      <span class="fname" id="fname">no file selected</span>
+    </div>
+    <div id="progwrap" style="display:none">
+      <div class="prog"><i id="bar"></i></div>
+      <div class="progtxt" id="progtxt">…</div>
+    </div>
+    <div class="err" id="err" style="display:none"></div>
+  </section>
+
+  <section class="card" id="result" style="display:none">
+    <h2>Result</h2>
+    <span class="verdict" id="verdict">—</span>
+    <div class="warnbox" id="reswarn" style="display:none"></div>
+    <video id="player" controls preload="metadata" playsinline></video>
+
+    <div class="tlwrap">
+      <div class="tllabel">
+        <span>Panic timeline — blue is the anomaly score, dashed red its threshold, red bands are PANIC, grey is baseline warm-up. Click to jump.</span>
+        <span id="tlend">—</span>
+      </div>
+      <canvas id="timeline"></canvas>
+    </div>
+
+    <div id="segs" class="segs"></div>
+    <div id="noseg" class="noseg" style="display:none">
+      No panic detected anywhere in this clip — the crowd stayed within normal movement for the whole duration.
+    </div>
+
+    <div class="stats" id="stats"></div>
+    <div class="rowline">
+      <a class="btn ghost" id="dl" download>Download annotated clip</a>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Live feeds</h2>
+    <div id="grid"></div>
+    <div class="empty" id="noRooms" style="display:none">
+      No live feeds configured. Start the server with
+      <code>PANIC_SOURCES="lobby=demo_crowd_30s.avi,webcam=0"</code> to add some.
+    </div>
+  </section>
+</main>
 
 <script>
+// --------------------------------------------------------------------- upload
+const $ = id => document.getElementById(id);
+const drop = $('drop'), fileInput = $('file'), go = $('go');
+let chosen = null, poll = null;
+
+drop.addEventListener('click', () => fileInput.click());
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', e => {
+  e.preventDefault(); drop.classList.remove('over');
+  if (e.dataTransfer.files.length) pick(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => { if (fileInput.files.length) pick(fileInput.files[0]); });
+
+function pick(f) {
+  chosen = f;
+  $('fname').textContent = f.name + '  (' + (f.size / 1048576).toFixed(1) + ' MB)';
+  go.disabled = false;
+  $('err').style.display = 'none';
+}
+
+function fmt(t) {
+  if (!isFinite(t)) return '—';
+  const m = Math.floor(t / 60), s = t - m * 60;
+  return m + ':' + (s < 10 ? '0' : '') + s.toFixed(1);
+}
+
+function showErr(msg) {
+  $('err').textContent = msg;
+  $('err').style.display = 'block';
+  go.disabled = false;
+  $('progwrap').style.display = 'none';
+}
+
+go.addEventListener('click', async () => {
+  if (!chosen) return;
+  go.disabled = true;
+  $('err').style.display = 'none';
+  $('result').style.display = 'none';
+  $('progwrap').style.display = 'block';
+  $('bar').style.width = '0%';
+  $('progtxt').textContent = 'uploading…';
+
+  const fd = new FormData();
+  fd.append('file', chosen);
+  let res;
+  try {
+    res = await fetch('/api/upload', { method: 'POST', body: fd });
+  } catch (e) { return showErr('upload failed: ' + e.message); }
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return showErr(data.error || ('upload failed (HTTP ' + res.status + ')'));
+
+  $('progtxt').textContent = 'queued…';
+  watch(data.job_id);
+});
+
+function watch(jobId) {
+  clearInterval(poll);
+  poll = setInterval(async () => {
+    let j;
+    try { j = await (await fetch('/api/jobs/' + jobId)).json(); }
+    catch (e) { return; }
+
+    if (j.status === 'error') {
+      clearInterval(poll);
+      return showErr('analysis failed — ' + j.message);
+    }
+    $('bar').style.width = (j.progress || 0) + '%';
+    if (j.status === 'queued') {
+      $('progtxt').textContent = 'queued — another clip is being analysed';
+    } else {
+      const parts = ['analysing ' + (j.progress || 0).toFixed(1) + '%'];
+      if (j.frames_total) parts.push(j.frames_done + ' / ' + j.frames_total + ' frames');
+      if (j.fps_processing) parts.push(j.fps_processing.toFixed(1) + ' fps');
+      if (j.eta) parts.push('~' + Math.round(j.eta) + 's left');
+      $('progtxt').textContent = parts.join('  ·  ');
+    }
+    if (j.status === 'done') {
+      clearInterval(poll);
+      $('progtxt').textContent = 'done in ' + j.result.elapsed + 's';
+      go.disabled = false;
+      render(jobId, j.result);
+    }
+  }, 600);
+}
+
+// --------------------------------------------------------------------- result
+let RESULT = null;
+
+function render(jobId, r) {
+  RESULT = r;
+  $('result').style.display = 'block';
+
+  const v = $('verdict');
+  v.textContent = r.verdict;
+  v.className = 'verdict ' + (r.segments.length ? 'panic' : 'clear');
+
+  const warn = [];
+  if (r.warning) warn.push(r.warning);
+  if (r.degraded) warn.push('Classifier ran DEGRADED: panic_model.pkl was found but could not be loaded (' + r.load_error + '), so the threshold-vote fallback was used.');
+  $('reswarn').style.display = warn.length ? 'block' : 'none';
+  $('reswarn').textContent = warn.join('  ');
+
+  const player = $('player');
+  player.src = '/api/jobs/' + jobId + '/video';
+  player.load();
+  $('dl').href = '/api/jobs/' + jobId + '/video';
+  $('tlend').textContent = fmt(r.duration);
+
+  // segments
+  const segs = $('segs');
+  segs.innerHTML = '';
+  $('noseg').style.display = r.segments.length ? 'none' : 'block';
+  r.segments.forEach((s, i) => {
+    const el = document.createElement('div');
+    el.className = 'seg';
+    el.textContent = '⚠ PANIC #' + (i + 1) + '   ' + fmt(s.start) + ' → ' + fmt(s.end) + '   (' + s.duration + 's)';
+    el.onclick = () => { player.currentTime = s.start; player.play(); };
+    segs.appendChild(el);
+  });
+
+  // stats
+  $('stats').innerHTML = [
+    ['Duration', fmt(r.duration)],
+    ['Frames', r.frames],
+    ['Panic episodes', r.segments.length],
+    ['Time in panic', (r.panic_fraction * 100).toFixed(1) + '%'],
+    ['Peak anomaly', r.score_threshold != null
+        ? r.peak_score.toFixed(1) + ' / ' + r.score_threshold.toFixed(1) + ' thr'
+        : r.peak_avg_speed.toFixed(2) + ' %diag/f'],
+    ['Decision backend', r.backend],
+    ['Analysis time', r.elapsed + 's'],
+    ['Source FPS', r.fps],
+  ].map(([k, val]) => '<div class="stat"><div class="k">' + k + '</div><div class="v">' + val + '</div></div>').join('');
+
+  drawTimeline();
+}
+
+const cv = $('timeline');
+function drawTimeline() {
+  if (!RESULT) return;
+  const r = RESULT, dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = 72;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+
+  const dur = r.duration || 1;
+  const x = t => (t / dur) * W;
+
+  // panic bands
+  g.fillStyle = 'rgba(248,81,73,.30)';
+  r.segments.forEach(s => g.fillRect(x(s.start), 0, Math.max(2, x(s.end) - x(s.start)), H));
+
+  // Anomaly score against its threshold. This is what the scene-baseline
+  // backend actually decides on, so it is the honest thing to plot: the curve
+  // crossing the dashed line is exactly why a band is red.
+  const pts = r.series;
+  const thr = r.score_threshold;
+  if (pts.length) {
+    const useScore = thr != null;
+    const key = useScore ? 'score' : 'avg_speed';
+    const peak = Math.max(0.001, ...pts.map(p => p[key]), useScore ? thr * 1.4 : 0);
+    const yOf = v => H - 6 - (v / peak) * (H - 16);
+
+    if (useScore) {                              // dashed threshold line
+      g.save(); g.setLineDash([4, 4]);
+      g.strokeStyle = 'rgba(248,81,73,.75)'; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(0, yOf(thr)); g.lineTo(W, yOf(thr)); g.stroke();
+      g.restore();
+    }
+    g.beginPath();
+    pts.forEach((p, i) => {
+      const px = x(p.t), py = yOf(p[key]);
+      i ? g.lineTo(px, py) : g.moveTo(px, py);
+    });
+    g.strokeStyle = '#58a6ff'; g.lineWidth = 1.5; g.stroke();
+
+    // grey out the warm-up stretch, where the detector cannot vote yet
+    const wu = pts.filter(p => p.warming_up);
+    if (wu.length) {
+      g.fillStyle = 'rgba(139,148,158,.20)';
+      g.fillRect(0, 0, x(wu[wu.length - 1].t), H);
+    }
+  }
+
+  // playhead
+  const t = $('player').currentTime || 0;
+  g.strokeStyle = '#fff'; g.lineWidth = 1.5;
+  g.beginPath(); g.moveTo(x(t), 0); g.lineTo(x(t), H); g.stroke();
+}
+
+cv.addEventListener('click', e => {
+  if (!RESULT) return;
+  const rect = cv.getBoundingClientRect();
+  const p = $('player');
+  p.currentTime = ((e.clientX - rect.left) / rect.width) * (RESULT.duration || 0);
+  p.play();
+});
+$('player').addEventListener('timeupdate', drawTimeline);
+$('player').addEventListener('seeked', drawTimeline);
+window.addEventListener('resize', drawTimeline);
+
+// ----------------------------------------------------------------------- live
+let lastBeep = 0;
 let audioCtx = null;
 function beep() {
-  if (document.getElementById('mute').checked) return;
+  if ($('mute').checked) return;
+  // The socket pushes state ~5x a second; without a floor this machine-guns a
+  // beep every 200ms for as long as the panic lasts.
+  const now = Date.now();
+  if (now - lastBeep < 1200) return;
+  lastBeep = now;
   audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-  const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+  const o = audioCtx.createOscillator(), gn = audioCtx.createGain();
   o.type = 'square'; o.frequency.value = 880;
-  o.connect(g); g.connect(audioCtx.destination);
-  g.gain.setValueAtTime(0.12, audioCtx.currentTime);
-  g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.35);
+  o.connect(gn); gn.connect(audioCtx.destination);
+  gn.gain.setValueAtTime(0.12, audioCtx.currentTime);
+  gn.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.35);
   o.start(); o.stop(audioCtx.currentTime + 0.35);
 }
 
@@ -68,35 +381,41 @@ function tile(room) {
       <div class="row"><span>Occupancy</span><b id="occ-${room}">—</b></div>
       <div class="row"><span>Persons</span><b id="ppl-${room}">—</b></div>
       <div class="row"><span>Panic Ratio</span><b id="pr-${room}">—</b></div>
+      <div class="row"><span>Anomaly score</span><b id="sc-${room}">—</b></div>
       <div class="row"><span class="tag">decision backend</span><span class="tag" id="be-${room}">—</span></div>
     </div>`;
   return el;
 }
 
 function connect(room) {
-  const ws = new WebSocket(`ws://${location.host}/ws/${room}`);
+  // ws:// breaks the moment the page is served over HTTPS — match the protocol.
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${proto}//${location.host}/ws/${room}`);
   ws.onmessage = (ev) => {
     const s = JSON.parse(ev.data), m = s.metrics || {};
     const panic = s.label === 'PANIC';
-    const badge = document.getElementById('badge-' + room);
-    const cam = document.getElementById('cam-' + room);
+    const badge = $('badge-' + room), cam = $('cam-' + room);
     badge.textContent = s.label; badge.classList.toggle('panic', panic);
     cam.classList.toggle('panic', panic);
-    const set = (id, v) => document.getElementById(id + '-' + room).textContent = v;
+    const set = (id, val) => $(id + '-' + room).textContent = val;
     set('spd', (m.avg_speed ?? 0).toFixed(2) + ' %diag/f');
     set('ent', (m.flow_entropy ?? 0).toFixed(2) + ' / 3.58');
     set('dir', (m.direction_variance ?? 0).toFixed(2));
     set('occ', (m.crowd_density ?? 0).toFixed(3));
     set('ppl', m.person_count ?? 0);
     set('pr', (s.panic_ratio ?? 0).toFixed(2));
-    set('be', s.backend);
+    set('sc', s.warming_up ? 'learning baseline…' : (s.score ?? 0).toFixed(1));
+    const be = $('be-' + room);
+    be.textContent = s.degraded ? s.backend + ' (model failed to load)' : s.backend;
+    be.classList.toggle('bad', !!s.degraded);
     if (panic) beep();
   };
   ws.onclose = () => setTimeout(() => connect(room), 1500);
 }
 
 fetch('/rooms').then(r => r.json()).then(d => {
-  const grid = document.getElementById('grid');
+  const grid = $('grid');
+  if (!d.rooms.length) { $('noRooms').style.display = 'block'; return; }
   d.rooms.forEach(room => { grid.appendChild(tile(room)); connect(room); });
 });
 </script>

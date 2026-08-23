@@ -12,8 +12,14 @@ Training data:
     (label 1). Every frame is labelled by construction.
   * REAL-NORMAL — frames sampled from a real calm crowd video (demo_crowd.mp4),
     all labelled NORMAL, so the model learns that real walking crowds are safe.
-  * (optional) --extra-normal / --extra-panic video files, e.g. UMN clips, to
-    fold in genuine footage when you have it.
+  * (optional) --extra-normal / --extra-panic video files to fold in genuine
+    footage when you have it. NOTE these label the WHOLE file one class.
+  * (optional) --umn Crowd-Activity-All.avi — real crowd escapes with PER-FRAME
+    labels recovered from the burned-in "Abnormal Crowd Activity" banner (see
+    umn_labels.py). UMN is ~85% calm, so --extra-panic is the wrong switch for
+    it: that would label people strolling on a lawn as panic. One scene is held
+    out entirely (--umn-holdout-scene) so there is still an honest test set;
+    splitting on random frames would leak, since neighbours are near-identical.
 
 Output: panic_model.pkl  (a scikit-learn Pipeline: StandardScaler + LogisticRegression)
 
@@ -76,6 +82,40 @@ def video_frames(path, max_frames=600, stride=1):
     cap.release()
 
 
+def umn_scene_frames(path, scene_idx):
+    """Yield the frames of one UMN scene, in order. Streams rather than
+    materialising the list — scene 2 alone is 4144 frames of 320x240x3."""
+    from umn_labels import SCENE_BOUNDS
+    a, b = SCENE_BOUNDS[scene_idx]
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        print(f"  ! could not open {path}, skipping")
+        return
+    i = 0
+    while True:
+        ret, f = cap.read()
+        if not ret or i > b:
+            break
+        if a <= i <= b:
+            if len(f.shape) == 2:
+                f = cv2.cvtColor(f, cv2.COLOR_GRAY2BGR)
+            yield f
+        i += 1
+    cap.release()
+
+
+def umn_rows(path, scene_idx, labels):
+    """Feature rows + per-frame labels for one UMN scene.
+
+    features_from_frames pairs consecutive frames, so row j comes from frames
+    (a+j, a+j+1); the label that belongs to it is the one for the SECOND frame
+    of the pair. Flow is never computed across a scene boundary."""
+    from umn_labels import SCENE_BOUNDS
+    a, b = SCENE_BOUNDS[scene_idx]
+    rows = features_from_frames(umn_scene_frames(path, scene_idx), (240, 320))
+    return rows, labels[a + 1: a + 1 + len(rows)]
+
+
 def build_dataset(args):
     X, y = [], []
 
@@ -111,6 +151,20 @@ def build_dataset(args):
                 rows = features_from_frames(frames, frames[0].shape[:2])
                 X += rows; y += [label] * len(rows)
 
+    # --- UMN real escapes, per-frame labelled ------------------------------
+    if args.umn:
+        from umn_labels import label_video, SCENE_BOUNDS
+        print(f"Labelling {args.umn} from its burned-in banner...")
+        labels, _ = label_video(args.umn)
+        holdout = args.umn_holdout_scene - 1
+        for s_idx in range(len(SCENE_BOUNDS)):
+            if s_idx == holdout:
+                print(f"  scene {s_idx+1}: HELD OUT for testing")
+                continue
+            rows, ylab = umn_rows(args.umn, s_idx, labels)
+            print(f"  scene {s_idx+1}: {len(rows)} frames, {sum(ylab)} abnormal")
+            X += rows; y += list(ylab)
+
     return np.array(X, dtype=float), np.array(y, dtype=int)
 
 
@@ -120,6 +174,10 @@ def main():
                     help="A real calm-crowd video, labelled NORMAL (default demo_crowd.mp4)")
     ap.add_argument("--extra-normal", default=None, help="Optional extra NORMAL video")
     ap.add_argument("--extra-panic", default=None, help="Optional real PANIC video (e.g. UMN)")
+    ap.add_argument("--umn", default=None,
+                    help="UMN Crowd-Activity-All.avi; per-frame labels from its banner")
+    ap.add_argument("--umn-holdout-scene", type=int, default=3,
+                    help="UMN scene (1-3) excluded from training, kept as a test set")
     ap.add_argument("--out", default="panic_model.pkl")
     args = ap.parse_args()
 

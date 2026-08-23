@@ -7,3 +7,5 @@ datasets/
 *.tar.gz
 panic_test.avi
 viz/
+uploads/
+.gstack/
