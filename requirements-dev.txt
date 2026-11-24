@@ -1,0 +1,5 @@
+# Test dependencies: PY -m pip install -r requirements-dev.txt
+-r requirements.txt
+pytest>=8.0
+# Starlette's TestClient (used by test_server.py).
+httpx>=0.27
