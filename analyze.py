@@ -140,7 +140,7 @@ def analyze_video(src_path, out_path, model, progress_cb=None,
                               interpolation=cv2.INTER_LINEAR)
             sboxes = [[x1 * s, y1 * s, x2 * s, y2 * s] for (x1, y1, x2, y2) in boxes]
             disp = draw_hud(disp, sboxes, flow, metrics, label,
-                            clf.panic_ratio(), flow_scale, False)
+                            clf.panic_ratio(), flow_scale, False, quit_hint=False)
 
             if writer is None:
                 writer = BrowserVideoWriter(out_path, disp.shape[1], disp.shape[0], fps)

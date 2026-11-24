@@ -37,7 +37,16 @@ def extract_boxes(results, conf_thresh):
     return boxes
 
 
-def draw_hud(frame, boxes, flow, metrics, label, panic_ratio, flow_scale, debug_flow):
+def draw_hud(frame, boxes, flow, metrics, label, panic_ratio, flow_scale, debug_flow,
+             panel=True, quit_hint=True):
+    """Draw boxes (+ optional flow arrows) and, by default, the metrics panel and
+    the CLI's "Q to quit" hint.
+
+    panel=False draws a thin status-coloured frame border instead of the panel:
+    for the dashboard's live tiles, which list the metrics beside the image and
+    where a fixed 310x175 px panel would cover most of a small feed.
+    quit_hint=False for anything that isn't the CLI window (dashboard, clips).
+    """
     H, W = frame.shape[:2]
     is_panic = label == "PANIC"
     status_color = (0, 0, 255) if is_panic else (0, 200, 0)
@@ -61,6 +70,12 @@ def draw_hud(frame, boxes, flow, metrics, label, panic_ratio, flow_scale, debug_
                     dy = flow[fy, fx, 1] / flow_scale
                     end = (int(x + dx * 2), int(y + dy * 2))
                     cv2.arrowedLine(frame, (x, y), end, (255, 140, 0), 1, tipLength=0.3)
+
+    if not panel:
+        if is_panic:
+            t = max(3, round(min(H, W) * 0.015))
+            cv2.rectangle(frame, (0, 0), (W - 1, H - 1), status_color, t)
+        return frame
 
     # Semi-transparent metrics panel
     panel_h, panel_w = 175, 310
@@ -88,9 +103,9 @@ def draw_hud(frame, boxes, flow, metrics, label, panic_ratio, flow_scale, debug_
         cv2.putText(frame, line, (18, y0 + i * dy),
                     font, 0.48, text_color, 1, cv2.LINE_AA)
 
-    # Quit hint
-    cv2.putText(frame, "Q to quit", (W - 105, H - 12),
-                font, 0.42, (160, 160, 160), 1, cv2.LINE_AA)
+    if quit_hint:
+        cv2.putText(frame, "Q to quit", (W - 105, H - 12),
+                    font, 0.42, (160, 160, 160), 1, cv2.LINE_AA)
 
     return frame
 

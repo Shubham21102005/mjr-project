@@ -34,7 +34,7 @@
     <div class="page-aside"><span class="rule" aria-hidden="true"></span><span><strong>Scene-relative detection</strong><br>Each feed learns its own baseline.</span></div>
   </div>
 
-  <div class="workspace">
+  <div class="workspace multi-workspace">
   <section class="panel" aria-labelledby="upload-title">
     <div class="panel-head"><div><span class="section-index">01 / REVIEW FOOTAGE</span><h2 id="upload-title">Analyse a clip</h2><p class="section-note">Find changes in crowd behaviour across a recording.</p></div></div>
     <div class="panel-body">
@@ -57,12 +57,41 @@
     </div>
   </section>
 
-  <section class="panel" aria-labelledby="live-title">
-    <div class="panel-head"><div><span class="section-index">02 / MONITOR LIVE</span><h2 id="live-title">Live feeds</h2><p class="section-note">Camera sources appear here as they connect.</p></div><a class="head-action" href="/camera">Connect camera ↗</a></div>
-    <div id="grid"></div>
+  <section class="panel live-panel-overview" aria-labelledby="live-title">
+    <div class="panel-head"><div><span class="section-index">02 / MONITOR LIVE</span><h2 id="live-title">Live rooms</h2><p class="section-note" id="liveSum" role="status">Connecting…</p></div><a class="head-action" href="#join" id="joinShortcut">Add phone camera ↗</a></div>
+
+    <details class="join" id="join">
+      <summary>Add a phone camera</summary>
+      <div class="joinbody">
+        <p class="section-note">Create a secure link for a phone to join a room.</p>
+        <div class="joinform">
+          <label>Room <input id="jRoom" value="lobby" maxlength="32" spellcheck="false"></label>
+          <label>Camera name <input id="jCam" maxlength="32" spellcheck="false" placeholder="phone1"></label>
+          <label class="wide">Phone address (HTTPS)
+            <input id="jBase" spellcheck="false" placeholder="https://xxxx.ngrok-free.app"></label>
+        </div>
+        <div class="jhint" id="jHint" role="status"></div>
+        <div class="rowline"><button class="btn" id="jGo" type="button">Create join code</button></div>
+        <div class="err" id="jErr" role="alert" style="display:none"></div>
+        <div class="qr" id="jOut" hidden>
+          <div class="code" id="jQr" aria-label="Phone join QR code"></div>
+          <div class="side">
+            <a id="jLink" target="_blank" rel="noopener noreferrer"></a>
+            <div class="rowline"><button class="btn ghost" id="jCopy" type="button">Copy link</button></div>
+            <ol>
+              <li>Scan the code with the phone and open the link.</li>
+              <li>Allow camera access, then tap Start.</li>
+              <li>Keep the phone steady. The feed appears here automatically.</li>
+            </ol>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <div id="rooms" class="rooms"></div>
     <div id="noRooms" style="display:none">
-      <div class="feed-stage"><span class="stage-icon" aria-hidden="true"></span><strong>No active feeds</strong><p>Connect this device’s camera to start monitoring. Its live view and detection status will appear here.</p><a href="/camera">Set up device camera →</a></div>
-      <div class="feed-footer"><span><b>Other sources</b> can be configured at server startup.</span><code>PANIC_SOURCES</code></div>
+      <div class="feed-stage"><span class="stage-icon" aria-hidden="true"></span><strong>No active rooms</strong><p>Add a phone camera or configure a source on the server to start monitoring.</p><a href="#join" id="emptyJoin">Set up a phone camera →</a></div>
+      <div class="feed-footer"><span><b>Server sources</b> use room/camera names.</span><code>PANIC_SOURCES</code></div>
     </div>
   </section>
   </div>
@@ -330,90 +359,236 @@ function beep() {
   o.start(); o.stop(audioCtx.currentTime + 0.35);
 }
 
-function tile(room) {
-  const el = document.createElement('div');
-  el.className = 'cam'; el.id = 'cam-' + room;
-  el.innerHTML = `
-    <div class="bar"><span class="name">${room} <span class="tag" id="kind-${room}"></span></span>
-      <span class="badge" id="badge-${room}">NORMAL</span></div>
-    <img src="/video/${room}" alt="${room} feed">
-    <div class="meta">
-      <div class="row"><span>Avg Speed</span><b id="spd-${room}">—</b></div>
-      <div class="row"><span>Flow Entropy</span><b id="ent-${room}">—</b></div>
-      <div class="row"><span>Dir Variance</span><b id="dir-${room}">—</b></div>
-      <div class="row"><span>Occupancy</span><b id="occ-${room}">—</b></div>
-      <div class="row"><span>Persons</span><b id="ppl-${room}">—</b></div>
-      <div class="row"><span>Panic Ratio</span><b id="pr-${room}">—</b></div>
-      <div class="row"><span>Anomaly score</span><b id="sc-${room}">—</b></div>
-      <div class="row"><span class="tag">decision backend</span><span class="tag" id="be-${room}">—</span></div>
-    </div>`;
-  return el;
+// One socket carries everything: JSON state for every room/camera, and each
+// camera's annotated JPEG as a binary message [idLen][id][jpeg].
+const ROOMS = new Map();   // room name -> { el, grid, badge, count }
+const CAMS = new Map();    // "room/cam" -> { el, img, url, fields... }
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
 }
 
-const SOCKETS = {};
+function makeRoom(name) {
+  const root = el('div', 'room');
+  const head = el('div', 'roomhead');
+  const badge = el('span', 'badge', 'ALL CLEAR');
+  const count = el('span', 'rcount');
+  head.append(el('span', 'rname', name), count, badge);
+  const grid = el('div', 'grid');
+  root.append(head, grid);
+  return { el: root, grid, badge, count };
+}
 
-function connect(room) {
-  // ws:// breaks the moment the page is served over HTTPS — match the protocol.
+const METRIC_ROWS = [
+  ['spd', 'Avg Speed'], ['ent', 'Flow Entropy'], ['dir', 'Dir Variance'], ['occ', 'Occupancy'],
+  ['ppl', 'Persons'], ['pr', 'Panic Ratio'], ['sc', 'Anomaly score'], ['fps', 'Analysed'],
+];
+
+function makeCam(s) {
+  const root = el('div', 'cam');
+  const bar = el('div', 'bar');
+  const badge = el('span', 'badge', 'NORMAL');
+  bar.append(el('span', 'name', s.cam), el('span', 'kind', s.kind === 'push' ? 'phone' : 'stream'), badge);
+  const view = el('div', 'view');
+  const img = el('img'); img.alt = s.id + ' feed'; img.hidden = true;   // until the first frame
+  const offline = el('div', 'offline', 'waiting for frames…');
+  view.append(img, offline);
+  const meta = el('div', 'meta');
+  const f = {};
+  METRIC_ROWS.forEach(([k, label]) => {
+    const row = el('div', 'row'); f[k] = el('b', null, '-');
+    row.append(el('span', null, label), f[k]); meta.append(row);
+  });
+  const brow = el('div', 'row'); f.be = el('span', 'tag', '-');
+  brow.append(el('span', 'tag', 'decision backend'), f.be); meta.append(brow);
+  root.append(bar, view, meta);
+  return { el: root, img, offline, badge, f, url: null };
+}
+
+function updateCam(c, s) {
+  const m = s.metrics || {}, panic = s.online && s.label === 'PANIC';
+  c.el.classList.toggle('panic', panic);
+  c.badge.className = 'badge' + (!s.online ? ' off' : panic ? ' panic' : s.warming_up ? ' learn' : '');
+  c.badge.textContent = !s.online ? 'OFFLINE' : s.warming_up ? 'LEARNING' : s.label;
+  c.offline.hidden = s.online && !!c.url;
+  c.offline.textContent = !c.url ? 'waiting for frames…'
+    : s.kind === 'push' ? 'offline: the phone stopped sending' : 'offline: the source stopped producing frames';
+  c.f.spd.textContent = (m.avg_speed ?? 0).toFixed(2) + ' %diag/f';
+  c.f.ent.textContent = (m.flow_entropy ?? 0).toFixed(2) + ' / 3.58';
+  c.f.dir.textContent = (m.direction_variance ?? 0).toFixed(2);
+  c.f.occ.textContent = (m.crowd_density ?? 0).toFixed(3);
+  c.f.ppl.textContent = m.person_count ?? 0;
+  c.f.pr.textContent = (s.panic_ratio ?? 0).toFixed(2);
+  c.f.sc.textContent = s.warming_up ? 'learning baseline…' : (s.score ?? 0).toFixed(1);
+  c.f.fps.textContent = s.online ? (s.fps ?? 0).toFixed(1) + ' fps' : '-';
+  c.f.be.textContent = s.degraded ? s.backend + ' (model failed to load)' : s.backend;
+  c.f.be.classList.toggle('bad', !!s.degraded);
+}
+
+function sameOrder(parent, nodes) {
+  const kids = parent.children;
+  if (kids.length !== nodes.length) return false;
+  return nodes.every((n, i) => kids[i] === n);
+}
+
+let LAST_ROOMS = [];
+function renderState(rooms) {
+  LAST_ROOMS = rooms;
+  const container = $('rooms');
+  const seenRooms = new Set(), seenCams = new Set();
+  let anyAlarm = false, camCount = 0, online = 0;
+
+  rooms.forEach(r => {
+    seenRooms.add(r.room);
+    let R = ROOMS.get(r.room);
+    if (!R) { R = makeRoom(r.room); ROOMS.set(r.room, R); }
+    R.el.classList.toggle('panic', r.alarm);
+    R.badge.className = 'badge' + (r.alarm ? ' panic' : '');
+    R.badge.textContent = r.alarm ? 'PANIC: ' + r.panic_cams.join(', ') : 'ALL CLEAR';
+    const on = r.cameras.filter(s => s.online).length;
+    R.count.textContent = r.cameras.length + (r.cameras.length === 1 ? ' camera' : ' cameras') +
+                          (on < r.cameras.length ? ' (' + on + ' online)' : '');
+    anyAlarm = anyAlarm || r.alarm; camCount += r.cameras.length; online += on;
+
+    const tiles = r.cameras.map(s => {
+      seenCams.add(s.id);
+      let C = CAMS.get(s.id);
+      if (!C) { C = makeCam(s); CAMS.set(s.id, C); }
+      updateCam(C, s);
+      return C.el;
+    });
+    if (!sameOrder(R.grid, tiles)) R.grid.replaceChildren(...tiles);
+  });
+
+  for (const [id, C] of CAMS) if (!seenCams.has(id)) {
+    if (C.url) URL.revokeObjectURL(C.url);
+    C.el.remove(); CAMS.delete(id);
+  }
+  for (const [name, R] of ROOMS) if (!seenRooms.has(name)) { R.el.remove(); ROOMS.delete(name); }
+  const roomEls = rooms.map(r => ROOMS.get(r.room).el);
+  if (!sameOrder(container, roomEls)) container.replaceChildren(...roomEls);
+
+  $('noRooms').style.display = rooms.length ? 'none' : 'block';
+  $('liveSum').textContent = rooms.length
+    ? rooms.length + (rooms.length === 1 ? ' room' : ' rooms') + ' · ' + online + ' of ' + camCount + ' cameras online'
+    : 'no cameras';
+  if (anyAlarm) beep();
+}
+
+function onFrame(buf) {
+  const bytes = new Uint8Array(buf);
+  const n = bytes[0];
+  const id = new TextDecoder().decode(bytes.subarray(1, 1 + n));
+  const C = CAMS.get(id);
+  if (!C) return;
+  const url = URL.createObjectURL(new Blob([bytes.subarray(1 + n)], { type: 'image/jpeg' }));
+  const old = C.url;
+  C.url = url;
+  C.img.onload = () => {
+    if (old) URL.revokeObjectURL(old);
+    if (C.img.hidden) { C.img.hidden = false; C.offline.hidden = true; }
+  };
+  C.img.src = url;
+}
+
+function connectLive() {
+  // ws:// breaks the moment the page is served over HTTPS; match the protocol.
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(`${proto}//${location.host}/ws/${room}`);
-  SOCKETS[room] = ws;
-  ws.onmessage = (ev) => {
-    const s = JSON.parse(ev.data), m = s.metrics || {};
-    const panic = s.label === 'PANIC';
-    const badge = $('badge-' + room), cam = $('cam-' + room);
-    badge.textContent = s.label; badge.classList.toggle('panic', panic);
-    cam.classList.toggle('panic', panic);
-    const set = (id, val) => $(id + '-' + room).textContent = val;
-    set('spd', (m.avg_speed ?? 0).toFixed(2) + ' %diag/f');
-    set('ent', (m.flow_entropy ?? 0).toFixed(2) + ' / 3.58');
-    set('dir', (m.direction_variance ?? 0).toFixed(2));
-    set('occ', (m.crowd_density ?? 0).toFixed(3));
-    set('ppl', m.person_count ?? 0);
-    set('pr', (s.panic_ratio ?? 0).toFixed(2));
-    set('sc', s.warming_up
-        ? 'calibrating ' + (s.warmup_have ?? 0) + '/' + (s.warmup_total ?? 0)
-        : (s.score ?? 0).toFixed(1) + (s.threshold != null ? ' / ' + s.threshold.toFixed(1) : ''));
-    const be = $('be-' + room);
-    be.textContent = s.degraded ? s.backend + ' (model failed to load)' : s.backend;
-    be.classList.toggle('bad', !!s.degraded);
-    if (panic) beep();
+  const ws = new WebSocket(`${proto}//${location.host}/ws/live`);
+  ws.binaryType = 'arraybuffer';
+  ws.onmessage = ev => {
+    if (typeof ev.data === 'string') {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === 'state') renderState(msg.rooms);
+    } else {
+      onFrame(ev.data);
+    }
   };
-  ws.onclose = () => {
-    // Don't reconnect a room we deliberately removed, or we'd resurrect its tile.
-    if (ws.manualClose) return;
-    setTimeout(() => { if (document.getElementById('cam-' + room)) connect(room); }, 1500);
-  };
+  ws.onclose = () => { $('liveSum').textContent = 'reconnecting…'; setTimeout(connectLive, 1500); };
+}
+connectLive();
+
+for (const id of ['joinShortcut', 'emptyJoin']) {
+  $(id).addEventListener('click', () => { $('join').open = true; });
 }
 
-// Rooms are no longer fixed at startup — a browser camera can create one at any
-// moment — so poll and reconcile instead of reading the list once on load.
-function syncRooms() {
-  fetch('/rooms').then(r => r.json()).then(d => {
-    const grid = $('grid');
-    const rooms = d.rooms || [];
-    const names = rooms.map(r => r.name);
-    $('noRooms').style.display = names.length ? 'none' : 'block';
+// ---------------------------------------------------------- add phone camera
+const isLocalHost = h => h === 'localhost' || h === '127.0.0.1' || h === '[::1]';
+let baseTouched = false;
 
-    rooms.forEach(r => {
-      if (!$('cam-' + r.name)) { grid.appendChild(tile(r.name)); connect(r.name); }
-      const kd = $('kind-' + r.name);
-      if (kd) kd.textContent = r.kind === 'push'
-        ? (r.clients ? r.clients + ' device' + (r.clients > 1 ? 's' : '') : 'idle')
-        : 'server source';
-    });
-
-    Array.from(grid.children).forEach(el => {
-      const n = el.id.replace(/^cam-/, '');
-      if (!names.includes(n)) {
-        const ws = SOCKETS[n];
-        if (ws) { ws.manualClose = true; try { ws.close(); } catch (e) {} delete SOCKETS[n]; }
-        el.remove();
-      }
-    });
-  }).catch(() => {});
+async function refreshBase() {
+  if (baseTouched) return;
+  let pub = null;
+  try { pub = (await (await fetch('/api/rooms')).json()).public_url; } catch (e) {}
+  // If this dashboard is itself being viewed through the tunnel, that's the address.
+  if (!pub && !isLocalHost(location.hostname)) pub = location.origin;
+  if (pub && $('jBase').value !== pub) $('jBase').value = pub;
+  hintBase();
 }
-syncRooms();
-setInterval(syncRooms, 3000);
+
+function hintBase() {
+  const v = $('jBase').value.trim(), h = $('jHint');
+  if (!v) {
+    h.className = 'jhint bad';
+    h.innerHTML = 'No public address yet. Phones only allow camera access over HTTPS, so run ' +
+      '<code>ngrok http 8000</code> in another terminal (the address fills in here automatically), ' +
+      'or <code>cloudflared tunnel --url http://localhost:8000</code> and paste its https address.';
+  } else if (!/^https:\/\//i.test(v)) {
+    h.className = 'jhint bad';
+    h.textContent = 'This address is plain http. A phone browser will refuse to open its camera on it; use the https address of a tunnel.';
+  } else {
+    h.className = 'jhint';
+    h.textContent = 'Phones will connect through ' + v + '. The link carries this server\'s access token, so only share it with devices you trust.';
+  }
+}
+
+const ISSUED = new Set();   // "room/cam" names already handed out as QR codes
+function nextCamName(room) {
+  const r = LAST_ROOMS.find(x => x.room === room);
+  const used = new Set((r ? r.cameras : []).map(c => c.cam));
+  for (let i = 1; ; i++) {
+    const name = 'phone' + i;
+    if (!used.has(name) && !ISSUED.has(room + '/' + name)) return name;
+  }
+}
+
+$('join').addEventListener('toggle', () => { if ($('join').open) refreshBase(); });
+setInterval(() => { if ($('join').open && !$('jBase').value) refreshBase(); }, 3000);
+$('jBase').addEventListener('input', () => { baseTouched = true; hintBase(); });
+
+$('jGo').addEventListener('click', async () => {
+  const room = $('jRoom').value.trim();
+  if (!$('jCam').value.trim()) $('jCam').value = nextCamName(room);
+  const cam = $('jCam').value.trim();
+  const q = new URLSearchParams({ room, cam, base: $('jBase').value.trim() });
+  $('jErr').style.display = 'none';
+  let d;
+  try {
+    const res = await fetch('/api/join?' + q);
+    d = await res.json();
+    if (!res.ok) throw new Error(d.error || ('HTTP ' + res.status));
+  } catch (e) {
+    $('jOut').hidden = true;
+    $('jErr').textContent = e.message; $('jErr').style.display = 'block';
+    return;
+  }
+  $('jQr').innerHTML = d.svg;               // generated server-side by the qrcode library
+  $('jLink').href = d.url; $('jLink').textContent = d.url;
+  $('jOut').hidden = false;
+  // Clear the name so the next QR gets a fresh one instead of colliding with this phone.
+  ISSUED.add(room + '/' + cam);
+  $('jCam').value = '';
+  $('jCam').placeholder = nextCamName(room);
+});
+
+$('jCopy').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText($('jLink').href); $('jCopy').textContent = 'Copied'; }
+  catch (e) { $('jCopy').textContent = 'Copy failed'; }
+  setTimeout(() => $('jCopy').textContent = 'Copy link', 1500);
+});
 </script>
 </body>
 </html>

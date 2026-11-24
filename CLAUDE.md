@@ -44,9 +44,24 @@ CLI, the server, clip analysis, training, and evaluation:
   `compute_metrics`, so training and inference features can't drift. The
   classifier's `FEATURES` list (in `train_classifier.py`) defines which metrics
   the model consumes — the pickle stores it alongside the model.
-- **No pipeline duplication.** `server.py` and `analyze.py` import
+- **No pipeline duplication.** `server.py`, `live.py` and `analyze.py` import
   `extract_boxes` and `draw_hud` from `detect.py`. Extend shared logic in place;
   don't copy it.
+- **One classifier per camera, never per room.** `scene-baseline` learns *that
+  feed's* calm, so each `live.Camera` owns its own `PanicClassifier`. A room's
+  alarm is only "any online camera in it is PANIC". A device re-attaching,
+  flipping lens, or changing frame shape (rotation) gets a fresh baseline.
+- **Live analysis cadence must stay steady.** `avg_speed` is motion per
+  processed frame, so the interval between processed frames must not jitter.
+  That is why `live.Scheduler` (flow + classifier, capped at `PANIC_LIVE_FPS`)
+  is a separate thread from `live.Detector` (batched YOLO, `PANIC_DETECT_FPS`):
+  YOLO costs ~10x flow on CPU. Don't put YOLO back on the analysis path.
+- **Latest-frame, never queue.** Sources write into a single-slot `FrameSlot`;
+  stale frames are dropped. Phones wait for each ack before sending the next
+  frame (backpressure). Don't add buffering that turns slowness into lag.
+- **Anything reachable from off-machine needs the token.** `auth.TokenGate` is
+  pure ASGI (covers WebSockets). Direct loopback requests with no proxy headers
+  are exempt; tunnels always add forwarding headers, so they are not.
 - **Three classifier backends**, selectable with the `PANIC_BACKEND` env var or
   `PanicClassifier(backend=...)`. All feed the same hysteresis window
   (`enter_fraction=0.6`, `exit_fraction=0.3`):
@@ -60,23 +75,6 @@ CLI, the server, clip analysis, training, and evaluation:
   `PanicClassifier` records `load_error`, exposes `degraded`, and prints a loud
   warning; the dashboard surfaces it. Don't reduce that back to a silent
   fallback.
-- **One pipeline, two ways to feed it.** `RoomBase.process(frame)` in `server.py`
-  is the only implementation of the live pipeline; `PullRoom` (server opens a file
-  or webcam index) and `PushRoom` (browser pushes JPEGs over `WS /ingest/{room}`)
-  differ only in where frames come from. Don't fork `process()`.
-- **Pushed frames drop, never queue.** `PushRoom.submit()` overwrites a single
-  `pending` slot. The pipeline runs ~15 fps on CPU; queueing a faster sender would
-  make the annotated view drift further behind real time every second. Dropping the
-  stale frame bounds latency and just lowers the effective rate.
-- **`/video/{room}` must stay an ASYNC generator.** As a sync generator it was
-  iterated through Starlette's threadpool ~25x/sec per viewer, which starved the
-  event loop badly enough that an ingest socket missed its keepalive pongs and the
-  server killed the upload mid-stream. It also only emits when `latest_jpeg`
-  actually changed. Don't revert either property.
-- **Room-scoped endpoints must re-resolve the room each iteration.** `/video/{room}`
-  and `/ws/{room}` used to bind `WORKERS.get(room)` once at connect; a push room
-  usually does not exist yet when a page first asks for it, so the connection stayed
-  dead forever. Look the room up inside the loop.
 - **Annotated video must be browser-playable.** Result clips go through
   `video_writer.py`, which pipes frames to system ffmpeg (`libx264`, `yuv420p`,
   `+faststart`). OpenCV's H.264 writer is unreliable (openh264 DLL is commonly
@@ -94,12 +92,22 @@ Install: `PY -m pip install -r requirements.txt`.
 ```bash
 # Web dashboard. Then open http://localhost:8000
 PY -m uvicorn server:app --host 127.0.0.1 --port 8000
-#   /          upload a clip + watch live feeds
-#   /camera    stream THIS device's camera into a room and run the model on it
 
 # ...with live rooms (opt-in; empty by default). Windows PowerShell:
-#   $env:PANIC_SOURCES="lobby=demo_crowd_30s.avi,webcam=0"
-PANIC_SOURCES="lobby=demo_crowd_30s.avi,webcam=0" PY -m uvicorn server:app --port 8000
+#   $env:PANIC_SOURCES="lobby=demo_crowd_30s.avi,lobby/webcam=0"
+PANIC_SOURCES="lobby=demo_crowd_30s.avi,lobby/webcam=0" PY -m uvicorn server:app --port 8000
+
+# Phones: expose over HTTPS (camera access requires it), then use the
+# dashboard's "+ Add a phone camera" QR code. Fix the token across restarts:
+PANIC_TOKEN=pick-a-secret PY -m uvicorn server:app --port 8000
+ngrok http 8000            # or: cloudflared tunnel --url http://localhost:8000
+
+# Simulate a phone pushing a clip into a room (same protocol as camera.html).
+PY fake_phone.py --source panic_test.avi --room lobby --cam sim1 --every-frame
+
+# Tests (pytest + Starlette TestClient; test_server.py loads real YOLO).
+PY -m pip install -r requirements-dev.txt
+PY -m pytest
 
 # CLI viewer (webcam, or a file). Q to quit; --debug-flow overlays flow arrows.
 PY detect.py --source 0
@@ -132,7 +140,9 @@ PY visualize.py --clip panic_test.avi --out viz/panic.mp4
 |---|---|
 | Core pipeline | `metrics.py`, `classifier.py`, `baseline.py` (scene-relative scoring) |
 | CLI viewer | `detect.py` (owns `extract_boxes` + `draw_hud`, reused by server/analyze) |
-| Web app | `server.py` (FastAPI: upload jobs + one worker thread per live room, MJPEG + WebSocket), `dashboard.html`, `camera.html` (browser capture page) |
+| Web app | `server.py` (FastAPI: upload jobs, live endpoints, ingest), `dashboard.html`, `auth.py` (token gate) |
+| Live cameras | `live.py` (FrameSlot, CaptureSource, Camera, Registry, Scheduler, Detector), `camera.html` (phone page), `fake_phone.py` (simulated phone) |
+| Tests | `test_live.py` (units, stub detector), `test_server.py` (in-process app, real YOLO) |
 | Clip analysis | `analyze.py` (offline pass over an upload), `video_writer.py` (ffmpeg/libx264) |
 | Training | `train_classifier.py`, `synth.py` (synthetic clip generator) |
 | Evaluation | `evaluate.py`, `visualize.py` (annotated debug renders), `umn_labels.py` (UMN per-frame ground truth) |
@@ -146,25 +156,13 @@ PY visualize.py --clip panic_test.avi --out viz/panic.mp4
   annotated MP4. One analysis at a time (`ANALYSIS_SEM`) — concurrent jobs would
   just make every progress bar lie. This is the demo path, since real panic can't
   be staged for a live camera.
-- **Live**, two kinds of room:
-  - *pull* — `PANIC_SOURCES` names files or webcam indices the server opens itself.
-    Opt-in and empty by default, so there is no permanently dead tile.
-  - *push* — a browser at `/camera` captures its own camera and pushes JPEGs over
-    `WS /ingest/{room}`. The room is created on first connect and reaped
-    `ROOM_IDLE_GRACE` (60s) after the last client leaves. That grace period is
-    load-bearing: tearing the room down on a page refresh would discard the scene
-    baseline and force another 90-frame warm-up.
-
-  Either kind is watched with `GET /rooms` (polled by the dashboard, so new rooms
-  appear without a reload), `/video/{room}` for annotated MJPEG and `WS /ws/{room}`
-  for labels and metrics. `POST /api/rooms/{room}/recalibrate` throws away a feed's
-  learned baseline — the escape hatch when warm-up happened while the scene was
-  already busy.
-
-  **`getUserMedia` needs a secure context.** `http://localhost` qualifies, so
-  own-camera use needs no TLS. A phone hitting `http://<lan-ip>:8000` does NOT, and
-  the camera fails *silently* rather than prompting — `camera.html` detects this and
-  says so. Serving over HTTPS is a prerequisite for the multi-device/QR phase.
+- **Live** (`GET /api/rooms`, `WS /ws/live`, `GET /video/{room}/{cam}`). Rooms
+  group cameras. Phones join by opening `/camera` (QR from `GET /api/join`) and
+  pushing JPEGs over `WS /ws/ingest/{room}/{cam}`; each ack carries the
+  camera's label and the room alarm, so phones alarm too. Server-pulled sources
+  are opt-in via `PANIC_SOURCES` (empty by default, so no permanently dead
+  tile). The dashboard gets all state and frames over ONE WebSocket because
+  per-camera MJPEG `<img>`s hit the browser's ~6 connections-per-host limit.
 
 ## Known gaps / caveats
 
@@ -208,12 +206,16 @@ PY visualize.py --clip panic_test.avi --out viz/panic.mp4
 - **UCSD is a mismatched benchmark.** UCSD anomalies are non-pedestrian objects
   (bikes, carts), not crowd panic. `evaluate.py` runs there for a reproducible
   numeric baseline only — expect low recall.
-- **Rooms are server-pulled, not device-pushed.** `project-summary.md` calls for
-  devices joining a shared room ID and pushing their camera in; what exists is a
-  fixed list of sources the server opens at startup. There is no ingest endpoint
-  and the page never captures a camera. Alert delivery is likewise unbuilt — the
-  alarm is a beep in whichever browser has the dashboard open.
-- **Multi-camera throughput.** ~15 fps per stream on CPU, and rooms share one
-  YOLO model with no frame-skipping, so N rooms split that budget.
+- **Alerts reach only open pages.** The dashboard and every phone in the room
+  flash/beep (phones also vibrate), but nothing is pushed (no notifications,
+  SMS, email).
+- **Phones must be mounted.** Camera shake is global flow and reads as panic.
+  No global-motion compensation yet (subtracting median flow would be the fix).
+- **Multi-camera throughput.** Measured on a 2-core laptop under load: YOLO
+  250-400 ms/frame, Farneback ~30 ms. With detection decoupled, 3 cameras held
+  ~10 fps analysis each. Beyond the CPU budget all cameras slow evenly.
+- **Short clips vs. warm-up on the live path.** `panic_test.avi` has 6 s of calm,
+  i.e. 60 frames at 10 fps, fewer than the 90-frame warm-up. Use
+  `fake_phone.py --every-frame` to stream it (keeps its per-frame motion).
 - Ignored / not committed: `datasets/`, `venv/`, `uploads/`, `panic_test.avi`,
   `viz/`, `__pycache__/` (see `.gitignore`).

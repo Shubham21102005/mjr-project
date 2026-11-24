@@ -2,275 +2,260 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Crowd Detection — Device Camera</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#183b32">
+<title>Panic Camera</title>
 <link rel="stylesheet" href="/ui.css">
 </head>
-<body>
-<header class="topbar">
+<body class="phone-page">
+<header class="topbar phone-topbar">
   <div class="topbar-inner">
     <a class="brand" href="/" aria-label="Crowd Detection home">
       <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
       <span class="brand-name">Crowd Detection<small>Analysis console</small></span>
     </a>
-    <nav class="topnav" aria-label="Main navigation">
-      <a href="/">Overview</a>
-      <a href="/camera" aria-current="page">Device camera</a>
-    </nav>
-    <div class="topbar-end"><span class="system-label" id="connectionStatus">Camera offline</span></div>
+    <span class="phone-connection"><span class="dot" id="dot" aria-hidden="true"></span><span id="conn" role="status">not streaming</span></span>
   </div>
 </header>
 
-<main class="page">
-  <div class="page-head">
-    <div><p class="eyebrow">Video monitoring / Device camera</p><h1>Bring a camera online.</h1><p class="lede">Send this device’s video to the detector and follow the annotated feed as it learns the scene.</p></div>
-    <div class="page-aside"><span class="rule" aria-hidden="true"></span><span><strong>Private by default</strong><br>Video is sent to this server only.</span></div>
+<main class="phone-shell">
+  <div class="phone-intro"><p class="eyebrow">LIVE SOURCE / DEVICE CAMERA</p><h1>Panic Camera</h1><p class="lede">Stream this device to a room. Keep the view steady while the detector learns ordinary movement.</p></div>
+
+<div class="stage" id="stage">
+  <video id="video" playsinline muted autoplay></video>
+  <div class="idle" id="idle">Pick a room and a name for this camera, then tap Start.</div>
+  <span class="badge" id="badge" hidden>NORMAL</span>
+</div>
+<div class="banner" id="banner" hidden>PANIC in this room</div>
+
+<form id="form" autocomplete="off">
+  <label>Room <input type="text" id="room" maxlength="32" spellcheck="false" autocapitalize="off"></label>
+  <label>Camera name <input type="text" id="cam" maxlength="32" spellcheck="false" autocapitalize="off"></label>
+  <div class="btns">
+    <button class="btn" id="start" type="submit">Start</button>
+    <button class="btn ghost" id="flip" type="button" disabled>Flip</button>
   </div>
+</form>
 
-  <div class="warnbox" id="insecure" role="alert" style="display:none"></div>
-  <div class="camera-layout">
+<div class="opts"><label style="flex-direction:row;align-items:center;gap:6px">
+  <input type="checkbox" id="mute"> mute alarm</label></div>
 
-  <section class="panel" aria-labelledby="source-title">
-    <div class="panel-head"><div><span class="section-index">01 / SOURCE SETUP</span><h2 id="source-title">Camera settings</h2><p class="section-note">Choose the source and stream quality.</p></div></div>
-    <div class="panel-body">
-    <div class="controls">
-      <div class="full">
-        <label class="f" for="room">Feed name</label>
-        <input id="room" value="mycam" autocomplete="off" spellcheck="false">
-      </div>
-      <div class="full">
-        <label class="f" for="cam">Camera</label>
-        <select id="cam"><option value="">Default camera</option></select>
-      </div>
-      <div>
-        <label class="f" for="fps">Send rate</label>
-        <select id="fps">
-          <option value="5">5 fps</option>
-          <option value="10" selected>10 fps</option>
-          <option value="15">15 fps</option>
-          <option value="30">30 fps</option>
-        </select>
-      </div>
-      <div>
-        <label class="f" for="res">Resolution</label>
-        <select id="res">
-          <option value="480x360">480 × 360</option>
-          <option value="640x480" selected>640 × 480</option>
-          <option value="960x720">960 × 720</option>
-        </select>
-      </div>
-    </div>
-    <div class="camera-actions"><button class="btn" id="go">Start camera <span aria-hidden="true">↗</span></button><button class="btn stop" id="stop" style="display:none">Stop camera</button><button class="btn ghost" id="recal" disabled title="Forget the learned baseline and start learning again">Recalibrate baseline</button></div>
-    <div class="err" id="err" role="alert" style="display:none"></div>
-    <div class="note"><strong>Before you begin</strong>The detector first learns ordinary movement in this view. Keep the camera steady during calibration, then monitor the status on the right.</div>
-    </div>
-  </section>
+<div class="stats">
+  <div class="stat"><div class="k">Sending</div><div class="v" id="sfps">-</div></div>
+  <div class="stat"><div class="k">Analysed</div><div class="v" id="afps">-</div></div>
+  <div class="stat"><div class="k">Upload</div><div class="v" id="kbps">-</div></div>
+</div>
 
-  <div class="panel" id="cameraEmpty">
-    <div class="panel-head"><div><span class="section-index">02 / LIVE VIEW</span><h2>Monitor</h2><p class="section-note">Your stream will appear here.</p></div></div>
-    <div class="feed-stage camera-empty"><span class="stage-icon" aria-hidden="true"></span><strong>Camera is offline</strong><p>Choose a source and start the camera to see the original and annotated views side by side.</p></div>
-  </div>
+<div class="msg err" id="err" role="alert" hidden></div>
+<div class="msg info" id="tip">
+  Prop the phone up or mount it so it stays still. A handheld camera shakes, and the
+  detector reads that shake as crowd movement. The first ~10 seconds are spent learning
+  what calm looks like here, so start while the scene is calm.
+</div>
 
-  <section class="panel live-panel" id="livecard" aria-labelledby="monitor-title" style="display:none">
-    <div class="panel-head"><div><span class="section-index">02 / LIVE VIEW</span><h2 id="monitor-title">Monitor</h2></div><span class="badge" id="badge" role="status">NORMAL</span></div>
-    <div class="panel-body">
-
-    <div class="views">
-      <div class="view">
-        <div class="cap"><span>Original feed</span><span id="sentTxt">—</span></div>
-        <video id="preview" playsinline muted></video>
-      </div>
-      <div class="view" id="annotWrap">
-        <div class="cap">
-          <span>Detection view</span>
-          <label class="checkline"><input type="checkbox" id="showAnnot" checked> Show</label>
-        </div>
-        <img id="annot" alt="Live feed annotated with detected people and movement status">
-      </div>
-    </div>
-
-    <div class="warmup" id="warmwrap" style="display:none">
-      <div class="warmup-label" id="warmtxt">Learning what normal looks like…</div>
-      <div class="warmup-bar"><i id="warmbar"></i></div>
-    </div>
-
-    <div class="stats" id="stats"></div>
-    <div class="camera-footer"><label class="checkline"><input type="checkbox" id="mute"> Mute alarm</label><a href="/">View on overview ↗</a></div>
-    </div>
-  </section>
-  </div>
-  <footer class="page-foot">Crowd Detection · Browser camera access requires localhost or HTTPS.</footer>
 </main>
-
-<canvas id="canvas" style="display:none"></canvas>
 
 <script>
 const $ = id => document.getElementById(id);
-let ws = null, stream = null, timer = null;
-let sent = 0, skipped = 0, lastLabel = 'NORMAL', lastBeep = 0, room = 'mycam';
+const params = new URLSearchParams(location.search);
+const TOKEN = params.get('token') || '';
+const FPS = Math.min(30, Math.max(1, Number(params.get('fps')) || 10));
+const LONG_SIDE = 640, QUALITY = 0.6;
+const NAME_RE = /^[A-Za-z0-9_-]{1,32}$/;
 
-// getUserMedia only works in a secure context. localhost counts; a plain-http
-// LAN address does NOT, and the failure is silent rather than a permission
-// prompt — so say so up front instead of letting it look broken.
-if (!window.isSecureContext) {
-  $('insecure').style.display = 'block';
-  $('insecure').innerHTML =
-    '<b>Camera access is blocked here.</b> Browsers only allow <code>getUserMedia</code> in a ' +
-    'secure context. This page is on <code>' + location.origin + '</code>, which is neither ' +
-    'HTTPS nor localhost, so the camera cannot start. Open it as ' +
-    '<code>http://localhost:' + (location.port || 80) + '/camera</code> on the machine running ' +
-    'the server, or serve the app over HTTPS.';
+function store(k, v) { try { v === undefined ? 0 : localStorage.setItem(k, v); return localStorage.getItem(k); } catch (e) { return null; } }
+function randomName() { return 'phone-' + Math.random().toString(36).slice(2, 6); }
+
+$('room').value = params.get('room') || store('panic.room') || 'lobby';
+$('cam').value = params.get('cam') || store('panic.cam') || randomName();
+
+const video = $('video');
+const canvas = document.createElement('canvas');
+const ctx = canvas.getContext('2d');
+
+let running = false, stream = null, ws = null, facing = 'environment';
+let inflight = false, sentAt = 0, nextTimer = null, ackTimer = null, retryTimer = null;
+let wakeLock = null, audio = null, lastBeep = 0, everConnected = false;
+let winFrames = 0, winBytes = 0, winStart = performance.now();
+
+function showErr(text) { $('err').textContent = text; $('err').hidden = !text; }
+function setConn(text, cls) { $('conn').textContent = text; $('dot').className = 'dot' + (cls ? ' ' + cls : ''); }
+
+if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+  showErr('This page needs HTTPS to use the camera. Open it with the https:// link or QR code ' +
+          'shown on the dashboard (start a tunnel such as "ngrok http 8000" on the server first).');
+  $('start').disabled = true;
 }
 
-navigator.mediaDevices?.enumerateDevices?.().then(ds => {
-  const cams = ds.filter(d => d.kind === 'videoinput');
-  cams.forEach((d, i) => {
-    const o = document.createElement('option');
-    o.value = d.deviceId;
-    o.textContent = d.label || ('camera ' + (i + 1));
-    $('cam').appendChild(o);
+// ------------------------------------------------------------------ camera
+async function openCamera() {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 },
+             frameRate: { ideal: Math.max(FPS, 15) } },
   });
-}).catch(() => {});
+  video.srcObject = stream;
+  await video.play().catch(() => {});
+  $('idle').hidden = true;
+}
 
-function showErr(msg) { $('err').textContent = msg; $('err').style.display = 'block'; }
+async function keepAwake() {
+  try { if ('wakeLock' in navigator && document.visibilityState === 'visible') wakeLock = await navigator.wakeLock.request('screen'); }
+  catch (e) { /* not fatal: the screen may just dim */ }
+}
 
-$('go').addEventListener('click', async () => {
-  $('err').style.display = 'none';
-  room = ($('room').value || 'mycam').trim().replace(/[^\w-]/g, '') || 'mycam';
-  $('room').value = room;
-  const [w, h] = $('res').value.split('x').map(Number);
-  const devId = $('cam').value;
-
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: Object.assign({ width: { ideal: w }, height: { ideal: h } },
-                           devId ? { deviceId: { exact: devId } } : { facingMode: 'environment' }),
-      audio: false,
-    });
-  } catch (e) {
-    return showErr('Could not open the camera — ' + e.name + ': ' + e.message +
-      (e.name === 'NotAllowedError' ? '  (permission denied; check the site permissions)' : '') +
-      (e.name === 'NotFoundError' ? '  (no camera found on this device)' : ''));
-  }
-
-  $('preview').srcObject = stream;
-  await $('preview').play().catch(() => {});
-
+// ---------------------------------------------------------------- streaming
+function wsUrl() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(proto + '//' + location.host + '/ingest/' + encodeURIComponent(room));
-  ws.onopen = () => {
-    $('connectionStatus').textContent = 'Camera live';
-    $('connectionStatus').classList.remove('offline');
-    $('cameraEmpty').style.display = 'none';
-    $('livecard').style.display = 'block';
-    $('go').style.display = 'none';
-    $('stop').style.display = 'inline-block';
-    $('recal').disabled = false;
-    $('annot').src = '/video/' + encodeURIComponent(room);
-    beginCapture(w, h);
+  const room = encodeURIComponent($('room').value), cam = encodeURIComponent($('cam').value);
+  return `${proto}//${location.host}/ws/ingest/${room}/${cam}?token=${encodeURIComponent(TOKEN)}`;
+}
+
+function connect() {
+  clearTimeout(retryTimer);
+  setConn('connecting…', 'wait');
+  ws = new WebSocket(wsUrl());
+  ws.onopen = () => { everConnected = true; inflight = false; showErr(''); setConn('streaming', 'on'); sendFrame(); };
+  ws.onmessage = ev => onAck(JSON.parse(ev.data));
+  ws.onclose = ev => {
+    clearTimeout(ackTimer); clearTimeout(nextTimer); inflight = false;
+    if (!running) return;
+    if (ev.code === 4401) return fail('The access token is missing or wrong. Reopen this page from the QR code on the dashboard (the token changes when the server restarts unless PANIC_TOKEN is set).');
+    if (ev.code === 4400) return fail('Room and camera names may only use letters, digits, "-" and "_".');
+    if (ev.code === 4409 && !everConnected) return fail('Another device is already streaming as "' + $('cam').value + '" in this room. Pick a different camera name.');
+    if (ev.code === 4409) return fail('This camera was taken over by a newer connection (is this page open twice?).');
+    setConn('reconnecting…', 'wait');
+    retryTimer = setTimeout(connect, 1500);
   };
-  ws.onmessage = ev => paint(JSON.parse(ev.data));
-  ws.onerror = () => showErr('WebSocket error — is the server still running?');
-  ws.onclose = () => { if (timer) stopAll(); };
-});
-
-$('stop').addEventListener('click', stopAll);
-
-$('recal').addEventListener('click', async () => {
-  await fetch('/api/rooms/' + encodeURIComponent(room) + '/recalibrate', { method: 'POST' });
-});
-
-function beginCapture(w, h) {
-  const cv = $('canvas'), ctx = cv.getContext('2d');
-  cv.width = w; cv.height = h;
-  sent = 0; skipped = 0;
-  const interval = 1000 / Number($('fps').value);
-  timer = setInterval(() => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    // Client-side backpressure: if the socket is already holding a backlog,
-    // skip this frame rather than queue it. A slow link then costs frame rate
-    // instead of building an ever-growing delay.
-    if (ws.bufferedAmount > 512 * 1024) { skipped++; return; }
-    const v = $('preview');
-    if (!v.videoWidth) return;
-    ctx.drawImage(v, 0, 0, w, h);
-    cv.toBlob(b => {
-      if (b && ws && ws.readyState === WebSocket.OPEN) { ws.send(b); sent++; }
-    }, 'image/jpeg', 0.7);
-  }, interval);
 }
 
-function stopAll() {
-  if (timer) { clearInterval(timer); timer = null; }
-  if (ws) { try { ws.close(); } catch (e) {} ws = null; }
-  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
-  $('annot').removeAttribute('src');
-  $('connectionStatus').textContent = 'Camera offline';
-  $('connectionStatus').classList.add('offline');
-  $('cameraEmpty').style.display = 'block';
-  $('livecard').style.display = 'none';
-  $('go').style.display = 'inline-block';
-  $('stop').style.display = 'none';
-  $('recal').disabled = true;
-  $('livecard').classList.remove('panic');
+function schedule(ms) { clearTimeout(nextTimer); nextTimer = setTimeout(sendFrame, ms); }
+
+function sendFrame() {
+  if (!running || !ws || ws.readyState !== WebSocket.OPEN || inflight) return;
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return schedule(100);
+  const s = Math.min(1, LONG_SIDE / Math.max(vw, vh));
+  canvas.width = Math.round(vw * s); canvas.height = Math.round(vh * s);
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  inflight = true; sentAt = performance.now();
+  canvas.toBlob(blob => {
+    if (!blob || !ws || ws.readyState !== WebSocket.OPEN) { inflight = false; return schedule(200); }
+    ws.send(blob);
+    winFrames++; winBytes += blob.size;
+    // If the server stops answering, the socket is dead even if it looks open.
+    clearTimeout(ackTimer);
+    ackTimer = setTimeout(() => { try { ws.close(); } catch (e) {} }, 8000);
+  }, 'image/jpeg', QUALITY);
 }
 
-$('showAnnot').addEventListener('change', e => {
-  $('annot').style.display = e.target.checked ? 'block' : 'none';
-  if (e.target.checked && room) $('annot').src = '/video/' + encodeURIComponent(room);
-  else $('annot').removeAttribute('src');
-});
+function onAck(a) {
+  clearTimeout(ackTimer);
+  inflight = false;
+  schedule(Math.max(0, 1000 / FPS - (performance.now() - sentAt)));
+
+  const badge = $('badge');
+  badge.hidden = false;
+  badge.textContent = a.warming_up ? 'LEARNING CALM…' : a.label;
+  badge.className = 'badge' + (a.label === 'PANIC' ? ' panic' : a.warming_up ? ' learn' : '');
+  $('stage').classList.toggle('panic', a.label === 'PANIC');
+
+  const others = (a.panic_cams || []).filter(c => c !== $('cam').value);
+  $('banner').hidden = !a.room_alarm;
+  $('banner').textContent = a.label === 'PANIC'
+    ? 'PANIC detected by this camera' + (others.length ? ' and ' + others.join(', ') : '')
+    : 'PANIC in this room: ' + others.join(', ');
+  document.body.classList.toggle('alarm', !!a.room_alarm);
+  if (a.room_alarm) alarm();
+
+  $('afps').textContent = a.fps ? a.fps.toFixed(1) + ' fps' : '-';
+  const now = performance.now(), dt = (now - winStart) / 1000;
+  if (dt >= 1) {
+    $('sfps').textContent = (winFrames / dt).toFixed(1) + ' fps';
+    $('kbps').textContent = Math.round(winBytes / dt / 1024) + ' KB/s';
+    winFrames = 0; winBytes = 0; winStart = now;
+  }
+}
 
 function alarm() {
-  if ($('mute').checked) return;
   const now = Date.now();
   if (now - lastBeep < 1200) return;
   lastBeep = now;
-  try {
-    const ac = alarm.ctx || (alarm.ctx = new (window.AudioContext || window.webkitAudioContext)());
-    const o = ac.createOscillator(), g = ac.createGain();
-    o.type = 'square'; o.frequency.value = 880;
-    o.connect(g); g.connect(ac.destination);
-    g.gain.setValueAtTime(0.12, ac.currentTime);
-    g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.35);
-    o.start(); o.stop(ac.currentTime + 0.35);
-  } catch (e) {}
-  navigator.vibrate?.([200, 90, 200]);
+  if (navigator.vibrate) navigator.vibrate([300, 120, 300]);
+  if ($('mute').checked || !audio) return;
+  const o = audio.createOscillator(), g = audio.createGain();
+  o.type = 'square'; o.frequency.value = 880;
+  o.connect(g); g.connect(audio.destination);
+  g.gain.setValueAtTime(0.15, audio.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.35);
+  o.start(); o.stop(audio.currentTime + 0.35);
 }
 
-function paint(s) {
-  const panic = s.label === 'PANIC';
-  const badge = $('badge');
-  badge.textContent = s.warming_up ? 'CALIBRATING' : s.label;
-  badge.className = 'badge' + (panic ? ' panic' : (s.warming_up ? ' warm' : ''));
-  $('livecard').classList.toggle('panic', panic);
-  if (panic && lastLabel !== 'PANIC') alarm();
-  else if (panic) alarm();
-  lastLabel = s.label;
-
-  const have = s.warmup_have || 0, total = s.warmup_total || 0;
-  $('warmwrap').style.display = s.warming_up ? 'block' : 'none';
-  if (s.warming_up) {
-    $('warmtxt').textContent = 'learning what normal looks like for this camera… ' + have + ' / ' + total + ' frames';
-    $('warmbar').style.width = (total ? have / total * 100 : 0) + '%';
+// ------------------------------------------------------------- start / stop
+async function start() {
+  const room = $('room').value.trim(), cam = $('cam').value.trim();
+  $('room').value = room; $('cam').value = cam;
+  if (!NAME_RE.test(room) || !NAME_RE.test(cam))
+    return showErr('Room and camera names may only use letters, digits, "-" and "_" (max 32).');
+  showErr('');
+  store('panic.room', room); store('panic.cam', cam);
+  // Audio must be unlocked inside the tap, or the alarm stays silent on iOS.
+  try { audio = audio || new (window.AudioContext || window.webkitAudioContext)(); audio.resume(); } catch (e) {}
+  try { await openCamera(); }
+  catch (e) {
+    return showErr(e.name === 'NotAllowedError'
+      ? 'Camera permission was denied. Allow camera access for this site in the browser settings, then tap Start again.'
+      : 'Could not open the camera: ' + (e.message || e.name));
   }
-
-  const m = s.metrics || {};
-  $('sentTxt').textContent = sent + ' sent · ' + skipped + ' skipped';
-  $('stats').innerHTML = [
-    ['Anomaly', s.threshold != null ? (s.score ?? 0).toFixed(1) + ' / ' + s.threshold.toFixed(1) : (s.score ?? 0).toFixed(1)],
-    ['Panic ratio', (s.panic_ratio ?? 0).toFixed(2)],
-    ['Avg speed', (m.avg_speed ?? 0).toFixed(2)],
-    ['Dir variance', (m.direction_variance ?? 0).toFixed(2)],
-    ['Flow entropy', (m.flow_entropy ?? 0).toFixed(2)],
-    ['Persons', m.person_count ?? 0],
-    ['Pipeline fps', (s.fps_in ?? 0).toFixed(1)],
-    ['Frames dropped', s.dropped ?? 0],
-    ['Backend', s.backend || '—'],
-  ].map(([k, v]) => '<div class="stat"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>').join('');
+  running = true; everConnected = false;
+  setUi();
+  keepAwake();
+  connect();
 }
 
-window.addEventListener('beforeunload', stopAll);
+function stop() {
+  running = false;
+  clearTimeout(nextTimer); clearTimeout(ackTimer); clearTimeout(retryTimer);
+  if (ws) { try { ws.close(1000); } catch (e) {} ws = null; }
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  video.srcObject = null;
+  if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+  $('idle').hidden = false; $('badge').hidden = true; $('banner').hidden = true;
+  $('stage').classList.remove('panic'); document.body.classList.remove('alarm');
+  ['sfps', 'afps', 'kbps'].forEach(id => $(id).textContent = '-');
+  setConn('not streaming', '');
+  setUi();
+}
+
+function fail(text) { stop(); showErr(text); }
+
+function setUi() {
+  $('start').textContent = running ? 'Stop' : 'Start';
+  $('start').classList.toggle('stop', running);
+  $('flip').disabled = !running;
+  $('room').disabled = running; $('cam').disabled = running;
+}
+
+$('form').addEventListener('submit', e => { e.preventDefault(); running ? stop() : start(); });
+
+$('flip').addEventListener('click', async () => {
+  facing = facing === 'environment' ? 'user' : 'environment';
+  try { await openCamera(); } catch (e) { return showErr('Could not switch camera: ' + (e.message || e.name)); }
+  // The other lens sees a different scene, so its calm baseline must be relearned.
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'reset' }));
+});
+
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState !== 'visible' || !running) return;
+  keepAwake();
+  // Mobile browsers stop the camera when the page is backgrounded.
+  const track = stream && stream.getVideoTracks()[0];
+  if (!track || track.readyState === 'ended') {
+    try { await openCamera(); } catch (e) { return fail('The camera stopped and could not be reopened.'); }
+  }
+  if (!ws || ws.readyState === WebSocket.CLOSED) connect();
+});
 </script>
 </body>
 </html>

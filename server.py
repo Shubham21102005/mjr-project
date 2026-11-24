@@ -9,43 +9,53 @@ Two modes, both served from the same page:
   the detector gets demonstrated: you cannot stage real panic in front of a live
   camera, so a recorded clip is the honest way to show it working.
 
-  LIVE — each "room" is one camera feed (a webcam index or a file path the
-  server can open). A background worker thread per room runs the same pipeline
-  and publishes the latest annotated JPEG + state; the page streams each as
-  MJPEG and receives labels/metrics over a WebSocket, flashing red and sounding
-  an alarm on PANIC.
+  LIVE (multi-camera) - a ROOM is a named group of CAMERAS. Cameras are either
+  pulled by the server (PANIC_SOURCES: webcam index, file, stream URL) or
+  pushed in by devices: a phone opens /camera, and its browser streams JPEG
+  frames over WS /ws/ingest/{room}/{cam}. Two threads serve every camera: one
+  runs the analysis pipeline at a steady rate, the other batches person
+  detection across cameras (see live.py). The dashboard gets every camera's
+  state and annotated frames over a single WebSocket (/ws/live), and a room
+  alarms when any of its cameras is in PANIC.
 
-Live rooms are opt-in via the PANIC_SOURCES env var (comma-separated
-name=source), because there is no sensible default camera to point at:
-    PANIC_SOURCES="lobby=demo_crowd_30s.avi,webcam=0"
+Pulled sources are opt-in via PANIC_SOURCES (comma-separated `room=source` or
+`room/cam=source`):
+    PANIC_SOURCES="lobby=demo_crowd_30s.avi,lobby/door=0"
+
+Phones need HTTPS for camera access, so put the server behind a tunnel:
+    ngrok http 8000            (or: cloudflared tunnel --url http://localhost:8000)
+Requests that come through a tunnel or from another device must carry the
+access token (PANIC_TOKEN, or a random one printed at startup); see auth.py.
 
 Run:
-    venv/Scripts/uvicorn server:app --host 127.0.0.1 --port 8000   # Windows
-    venv/bin/uvicorn server:app --host 127.0.0.1 --port 8000       # macOS/Linux
+    venv/Scripts/python -m uvicorn server:app --host 127.0.0.1 --port 8000   # Windows
+    venv/bin/python -m uvicorn server:app --host 127.0.0.1 --port 8000       # macOS/Linux
 Then open http://localhost:8000
 """
 import asyncio
+import io
+import json
 import os
-import shutil
 import threading
 import time
+import urllib.parse
+import urllib.request
 import uuid
 from contextlib import asynccontextmanager
 
-import cv2
 import numpy as np
+import cv2
+import qrcode
+import qrcode.image.svg
 from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
 from ultralytics import YOLO
 
+import live
 from analyze import analyze_video
-from classifier import PanicClassifier
-from detect import extract_boxes, draw_hud
-from metrics import compute_metrics
+from auth import TokenGate, load_token
 from video_writer import ffmpeg_available
 
-FLOW_SCALE = 0.5
-CONF = 0.4
 MODEL_WEIGHTS = os.environ.get("PANIC_MODEL", "yolov8n.pt")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -111,254 +121,48 @@ def _run_analysis(job_id, src_path, out_path):
                  result=result)
 
 
+# --------------------------------------------------------------------------- #
+# Live cameras: registry + scheduler (see live.py), access token (see auth.py)
+# --------------------------------------------------------------------------- #
+
+REGISTRY = live.Registry()
+SCHEDULER = DETECTOR = None
+ACCESS_TOKEN, TOKEN_GENERATED = load_token()
+
+MAX_FRAME_BYTES = 2 * 1024 * 1024        # one pushed JPEG; 640px at q0.6 is ~40 KB
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global SCHEDULER, DETECTOR
     os.makedirs(UPLOAD_DIR, exist_ok=True)
-    for room, src in parse_sources().items():
-        w = PullRoom(room, src)
-        w.start()
-        WORKERS[room] = w
-    print(f"[server] pull rooms: {list(WORKERS) or '(none)'}  "
-          f"(push rooms are created on demand from /camera)")
+
+    # Empty by default: there is no sensible default feed, and a source that
+    # isn't there just shows up as a permanently dead tile.
+    for room, cam, src in live.parse_sources(os.environ.get("PANIC_SOURCES", "")):
+        try:
+            REGISTRY.add_pull(room, cam, src)
+        except (ValueError, live.CameraInUse) as e:
+            print(f"[server] skipping PANIC_SOURCES entry {room}/{cam}: {e}")
+    SCHEDULER = live.Scheduler(REGISTRY)
+    DETECTOR = live.Detector(REGISTRY, _yolo)
+    SCHEDULER.start()
+    DETECTOR.start()
+
+    pulled = [c.id for c in REGISTRY.cameras()]
+    print(f"[server] pulled cameras: {pulled or '(none; phones can still join via /camera)'}")
+    print(f"[server] access token for phones / tunnel: {ACCESS_TOKEN}"
+          + ("  (random per run; set PANIC_TOKEN to keep it fixed)" if TOKEN_GENERATED else ""))
     if not ffmpeg_available():
         print("[server] WARNING: ffmpeg not on PATH; annotated clips may not play in the browser")
     yield
-    for w in WORKERS.values():
-        w.running = False
-
-
-# --------------------------------------------------------------------------- #
-# Live rooms
-# --------------------------------------------------------------------------- #
-
-# How long a browser-pushed room survives with no clients attached. This grace
-# period is not politeness: tearing the room down the instant a tab reloads would
-# throw away the scene baseline and force another 90-frame warm-up before the
-# detector could fire again.
-ROOM_IDLE_GRACE = 60.0
-
-
-class RoomBase(threading.Thread):
-    """One live feed: owns a classifier and publishes annotated frames + state.
-
-    Subclasses differ ONLY in where frames come from. process() is the single
-    implementation of the pipeline, so a frame pushed from a browser and a frame
-    pulled from a webcam are scored by identical code -- the same invariant that
-    makes detect.py, analyze.py and evaluate.py share compute_metrics.
-    """
-
-    kind = "base"
-
-    def __init__(self, room):
-        super().__init__(daemon=True)
-        self.room = room
-        self.classifier = PanicClassifier()
-        self.lock = threading.Lock()
-        self.latest_jpeg = None
-        self.running = True
-        self.prev_gray = None
-        self.clients = 0
-        self.idle_since = None
-        self.received = 0
-        self.dropped = 0
-        self.fps_in = 0.0
-        self._t_last = None
-        self.state = self._state("NORMAL", {}, online=False)
-
-    # -- state -------------------------------------------------------------- #
-
-    def _state(self, label, metrics, online=True):
-        bl = self.classifier.baseline
-        return {
-            "room": self.room,
-            "kind": self.kind,
-            "label": label,
-            "panic_ratio": round(self.classifier.panic_ratio(), 2),
-            "backend": self.classifier.backend,
-            "degraded": self.classifier.degraded,
-            "score": round(self.classifier.anomaly_score, 2),
-            "threshold": bl.k if bl is not None else None,
-            "warming_up": self.classifier.warming_up,
-            "warmup_have": len(bl.history) if bl is not None else 0,
-            "warmup_total": bl.warmup if bl is not None else 0,
-            "metrics": {k: round(float(v), 3) for k, v in metrics.items()},
-            "clients": self.clients,
-            "received": self.received,
-            "dropped": self.dropped,
-            "fps_in": round(self.fps_in, 1),
-            "online": online,
-        }
-
-    def snapshot(self):
-        # Connection counters are facts about right now, not about the last frame
-        # that happened to be processed. Reading them off the frozen state dict
-        # left `clients` stale after a device disconnected, so overlay them live.
-        with self.lock:
-            s = dict(self.state)
-        s["clients"] = self.clients
-        s["received"] = self.received
-        s["dropped"] = self.dropped
-        s["fps_in"] = round(self.fps_in, 1)
-        if self.kind == "push":
-            s["online"] = self.clients > 0
-        return s
-
-    def reset_baseline(self):
-        """Re-learn what normal looks like for this feed. Needed when the camera
-        was pointed at something busy during warm-up and learned chaos as calm."""
-        with self.lock:
-            self.classifier = PanicClassifier()
-            self.prev_gray = None
-
-    def stop(self):
-        self.running = False
-
-    # -- the pipeline, defined once ----------------------------------------- #
-
-    def process(self, frame):
-        if len(frame.shape) == 2:
-            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-        H, W = frame.shape[:2]
-
-        boxes = extract_boxes(_yolo(frame, classes=[0], verbose=False), CONF)
-        small = cv2.resize(frame, (0, 0), fx=FLOW_SCALE, fy=FLOW_SCALE)
-        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-
-        metrics, flow = {}, None
-        label = self.classifier.state
-        if self.prev_gray is not None:
-            flow = cv2.calcOpticalFlowFarneback(
-                self.prev_gray, gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
-            metrics = compute_metrics(flow, boxes, (H, W))
-            label = self.classifier.update(metrics)
-        self.prev_gray = gray
-
-        disp = draw_hud(frame.copy(), boxes, flow, metrics, label,
-                        self.classifier.panic_ratio(), FLOW_SCALE, False)
-        ok, buf = cv2.imencode(".jpg", disp, [cv2.IMWRITE_JPEG_QUALITY, 75])
-
-        now = time.time()
-        if self._t_last is not None:
-            dt = now - self._t_last
-            if dt > 0:
-                inst = 1.0 / dt
-                self.fps_in = inst if not self.fps_in else 0.8 * self.fps_in + 0.2 * inst
-        self._t_last = now
-
-        if ok:
-            with self.lock:
-                self.latest_jpeg = buf.tobytes()
-                self.state = self._state(label, metrics)
-
-
-class PullRoom(RoomBase):
-    """Server-pulled feed: a file path or a webcam index the server opens itself."""
-
-    kind = "pull"
-
-    def __init__(self, room, source):
-        super().__init__(room)
-        self.source = int(source) if str(source).isdigit() else source
-        self.is_file = not str(source).isdigit()
-
-    def run(self):
-        cap = cv2.VideoCapture(self.source)
-        while self.running:
-            ret, frame = cap.read()
-            if not ret:
-                if self.is_file:                   # loop video files for a live demo
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    self.prev_gray = None
-                    continue
-                time.sleep(0.2)
-                continue
-            self.received += 1
-            self.process(frame)
-        cap.release()
-
-
-class PushRoom(RoomBase):
-    """Browser-pushed feed. JPEG frames arrive over WS /ingest/{room}."""
-
-    kind = "push"
-
-    def __init__(self, room):
-        super().__init__(room)
-        self.cond = threading.Condition()
-        self.pending = None
-
-    def submit(self, data):
-        """Hand the newest frame to the worker.
-
-        Overwriting `pending` IS the backpressure. The pipeline runs ~15 fps on
-        CPU; if the browser sends faster, queueing would push the annotated view
-        further behind real time every second. Dropping the stale frame instead
-        keeps latency bounded and simply lowers the effective rate.
-        """
-        with self.cond:
-            if self.pending is not None:
-                self.dropped += 1
-            self.pending = data
-            self.received += 1
-            self.cond.notify()
-
-    def stop(self):
-        self.running = False
-        with self.cond:
-            self.cond.notify_all()
-
-    def run(self):
-        while self.running:
-            with self.cond:
-                while self.pending is None and self.running:
-                    self.cond.wait(0.5)
-                data, self.pending = self.pending, None
-            if not data:
-                continue
-            frame = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
-            if frame is not None:
-                self.process(frame)
-
-
-def parse_sources():
-    """Pull rooms from PANIC_SOURCES. Empty by default -- there is no sensible
-    default feed, and a room pointing at a file that isn't there just shows up
-    as a permanently dead tile."""
-    raw = os.environ.get("PANIC_SOURCES", "").strip()
-    rooms = {}
-    for part in raw.split(","):
-        if "=" in part:
-            name, src = part.split("=", 1)
-            if name.strip() and src.strip():
-                rooms[name.strip()] = src.strip()
-    return rooms
+    SCHEDULER.running = False
+    DETECTOR.running = False
+    REGISTRY.stop()
 
 
 app = FastAPI(title="Crowd Panic Detection", lifespan=lifespan)
-WORKERS = {}
-WORKERS_LOCK = threading.Lock()
-
-
-def get_or_create_push_room(room):
-    with WORKERS_LOCK:
-        r = WORKERS.get(room)
-        if r is None or not r.is_alive():
-            r = PushRoom(room)
-            r.start()
-            WORKERS[room] = r
-        return r
-
-
-def reap_idle_rooms():
-    """Stop push rooms whose last client left more than ROOM_IDLE_GRACE ago."""
-    now = time.time()
-    with WORKERS_LOCK:
-        for name, r in list(WORKERS.items()):
-            if r.kind != "push" or r.clients > 0 or r.idle_since is None:
-                continue
-            if now - r.idle_since > ROOM_IDLE_GRACE:
-                r.stop()
-                WORKERS.pop(name, None)
+app.add_middleware(TokenGate, token=ACCESS_TOKEN)
 
 
 # --------------------------------------------------------------------------- #
@@ -475,152 +279,179 @@ def delete_job(job_id: str):
 # Live API
 # --------------------------------------------------------------------------- #
 
-@app.get("/rooms")
-def rooms():
-    reap_idle_rooms()
-    with WORKERS_LOCK:
-        items = []
-        for name, w in WORKERS.items():
-            snap = w.snapshot()
-            items.append({
-                "name": name,
-                "kind": w.kind,
-                "clients": w.clients,
-                "online": snap.get("online", False),
-            })
-    return {"rooms": items, "ffmpeg": ffmpeg_available()}
+_ngrok_cache = {"t": 0.0, "url": None}
 
 
-@app.get("/video/{room}")
-def video(room: str):
-    """Annotated MJPEG for a room.
+def detect_public_url():
+    """The HTTPS address phones should use: PANIC_PUBLIC_URL if set, otherwise
+    whatever a locally running ngrok agent reports on its inspection API."""
+    env = os.environ.get("PANIC_PUBLIC_URL", "").strip().rstrip("/")
+    if env:
+        return env
+    now = time.monotonic()
+    if now - _ngrok_cache["t"] < 5.0:
+        return _ngrok_cache["url"]
+    url = None
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:4040/api/tunnels", timeout=0.4) as r:
+            tunnels = json.load(r).get("tunnels", [])
+        https = [t["public_url"] for t in tunnels
+                 if str(t.get("public_url", "")).startswith("https://")]
+        url = https[0] if https else None
+    except Exception:
+        url = None
+    _ngrok_cache.update(t=now, url=url)
+    return url
 
-    The room is re-resolved on every iteration rather than bound once: a push
-    room usually does not exist yet when the page that displays it first asks
-    for the stream, and binding once would 404 forever. Instead we hold the
-    connection open and start emitting as soon as the room appears.
 
-    This generator is ASYNC on purpose. As a sync generator it was iterated via
-    Starlette's threadpool, costing a threadpool round-trip ~25x a second per
-    viewer; with a browser watching a feed while a device pushed to it, that
-    starved the event loop badly enough that the ingest socket missed its
-    keepalive pongs and the server killed the upload mid-stream. Awaiting here
-    keeps everything on the loop.
+@app.get("/api/rooms")
+def api_rooms():
+    return {"rooms": REGISTRY.snapshot(), "ffmpeg": ffmpeg_available(),
+            "public_url": detect_public_url(), "live_fps": live.LIVE_FPS}
 
-    It also only emits when the pipeline has actually produced a NEW frame.
-    Re-sending the same JPEG 25x/sec when the pipeline only manages ~15 fps was
-    pure waste on both bandwidth and loop time.
+
+@app.get("/api/join")
+def api_join(room: str, cam: str, base: str = ""):
+    """The link (and its QR code) a phone opens to join room/cam."""
+    if not (live.valid_name(room) and live.valid_name(cam)):
+        return JSONResponse({"error": "room and camera names may use letters, digits, "
+                                      "'-' and '_' (max 32)"}, status_code=400)
+    base = (base or detect_public_url() or "").strip().rstrip("/")
+    parsed = urllib.parse.urlparse(base)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return JSONResponse({"error": "no public URL: start a tunnel (ngrok http 8000) "
+                                      "or enter the address phones should use"},
+                            status_code=400)
+    query = urllib.parse.urlencode({"room": room, "cam": cam, "token": ACCESS_TOKEN})
+    url = f"{parsed.scheme}://{parsed.netloc}/camera?{query}"
+    img = qrcode.make(url, image_factory=qrcode.image.svg.SvgPathImage, box_size=8, border=2)
+    buf = io.BytesIO()
+    img.save(buf)
+    return {"url": url, "svg": buf.getvalue().decode("utf-8"),
+            "secure": parsed.scheme == "https"
+                      or parsed.hostname in ("localhost", "127.0.0.1")}
+
+
+@app.websocket("/ws/ingest/{room}/{cam}")
+async def ingest(websocket: WebSocket, room: str, cam: str):
+    """A device pushes its camera into room/cam.
+
+    Protocol: the device sends one binary JPEG frame, the server replies with a
+    JSON ack carrying this camera's label and the room's alarm, then the device
+    sends the next frame. Waiting for the ack is the device's backpressure: on a
+    slow uplink it sends less often instead of piling up seconds of lag.
+
+    Text messages are control messages: {"type": "reset"} asks the server to
+    relearn this camera's baseline (the phone sends it after switching between
+    front and back camera, since that is a different scene).
     """
+    await websocket.accept()
+    try:
+        camera, gen = REGISTRY.attach_push(room, cam)
+    except ValueError as e:
+        await websocket.close(code=4400, reason=str(e))
+        return
+    except live.CameraInUse as e:
+        await websocket.close(code=4409, reason=str(e))
+        return
+
+    print(f"[server] camera joined: {camera.id}")
+    try:
+        while True:
+            msg = await websocket.receive()
+            if msg["type"] == "websocket.disconnect":
+                break
+            if camera.conn_gen != gen:
+                # A newer connection from this device took over (see attach_push).
+                await websocket.close(code=4409, reason="replaced by a newer connection")
+                break
+            data = msg.get("bytes")
+            if data is None:
+                try:
+                    if json.loads(msg.get("text") or "{}").get("type") == "reset":
+                        camera.reset()
+                except (ValueError, AttributeError):
+                    pass
+                continue
+            if len(data) > MAX_FRAME_BYTES:
+                await websocket.close(code=4413, reason="frame too large")
+                break
+            frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+            if frame is not None:
+                camera.slot.put(frame)
+            s = camera.snapshot()
+            panic_cams = REGISTRY.room_alarm(room)
+            await websocket.send_json({
+                "label": s["label"], "score": s["score"], "warming_up": s["warming_up"],
+                "fps": s["fps"], "room_alarm": bool(panic_cams), "panic_cams": panic_cams,
+                "decoded": frame is not None,
+            })
+    except (WebSocketDisconnect, OSError, RuntimeError):
+        pass
+    finally:
+        REGISTRY.detach_push(camera, gen)
+        print(f"[server] camera left: {camera.id}")
+
+
+@app.websocket("/ws/live")
+async def live_feed(websocket: WebSocket):
+    """Everything the dashboard needs on ONE socket: JSON state for all rooms
+    (~5x/s) and each camera's annotated JPEG whenever it changes.
+
+    Frames go over this WebSocket instead of one MJPEG <img> per camera because
+    browsers allow only ~6 concurrent HTTP/1.1 connections per host: with
+    MJPEG, a 7th camera would never load and would also block every fetch().
+
+    Binary message layout: [1 byte id length][camera id, utf-8][jpeg bytes].
+    """
+    await websocket.accept()
+    sent = {}
+    last_state = 0.0
+    try:
+        while True:
+            now = time.monotonic()
+            if now - last_state >= 0.2:
+                await websocket.send_json({"type": "state", "rooms": REGISTRY.snapshot()})
+                last_state = now
+            for camera in REGISTRY.cameras():
+                seq, jpeg = camera.latest_jpeg()
+                if jpeg is not None and sent.get(camera.id) != seq:
+                    sent[camera.id] = seq
+                    cid = camera.id.encode("utf-8")
+                    await websocket.send_bytes(bytes([len(cid)]) + cid + jpeg)
+            await asyncio.sleep(0.03)
+    except (WebSocketDisconnect, OSError, RuntimeError):
+        pass
+
+
+@app.get("/video/{room}/{cam}")
+async def video(room: str, cam: str):
+    """MJPEG for one camera, for viewing a single feed directly (or in VLC)."""
+    camera = REGISTRY.get(room, cam)
+    if camera is None:
+        return HTMLResponse(f"unknown camera {room}/{cam}", status_code=404)
+
     async def gen():
         boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
-        waited = 0.0
         last = None
-        while True:
-            worker = WORKERS.get(room)
-            frame = worker.latest_jpeg if worker is not None else None
-            if frame is not None:
-                if frame is not last:
-                    yield boundary + frame + b"\r\n"
-                    last = frame
-                waited = 0.0
-            else:
-                waited += 0.03
-                if waited > 30.0:        # room never showed up; let the client go
-                    break
+        while REGISTRY.get(room, cam) is camera:
+            seq, jpeg = camera.latest_jpeg()
+            if jpeg is not None and seq != last:
+                last = seq
+                yield boundary + jpeg + b"\r\n"
             await asyncio.sleep(0.03)
 
     return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
-@app.websocket("/ws/{room}")
-async def ws(websocket: WebSocket, room: str):
-    """Live labels + metrics for a dashboard tile.
-
-    Same re-resolution point as /video: the previous version captured the worker
-    once at connect time, so a room created later stayed None forever and the
-    socket silently sent nothing for the life of the connection.
-    """
-    await websocket.accept()
-    try:
-        while True:
-            worker = WORKERS.get(room)
-            if worker is not None:
-                await websocket.send_json(worker.snapshot())
-            else:
-                await websocket.send_json({"room": room, "label": "NORMAL",
-                                           "online": False, "metrics": {}})
-            await asyncio.sleep(0.2)
-    except WebSocketDisconnect:
-        pass
-
-
-@app.websocket("/ingest/{room}")
-async def ingest(websocket: WebSocket, room: str):
-    """Receive camera frames pushed from a browser.
-
-    Two independent tasks run for the life of the connection: one draining
-    incoming JPEG frames into the room, one pushing state back. They are
-    deliberately decoupled -- the sender must keep reporting label and score
-    even if the camera stalls, and that same downstream channel is what device
-    alerts will use once multiple devices can share a room.
-    """
-    await websocket.accept()
-    r = get_or_create_push_room(room)
-    r.clients += 1
-    r.idle_since = None
-    print(f"[server] room '{room}': device connected ({r.clients} total)")
-
-    async def pump_in():
-        while True:
-            msg = await websocket.receive()
-            if msg.get("type") == "websocket.disconnect":
-                return
-            data = msg.get("bytes")
-            if data:
-                r.submit(data)
-
-    async def pump_out():
-        while True:
-            await websocket.send_json(r.snapshot())
-            await asyncio.sleep(0.2)
-
-    tasks = [asyncio.create_task(pump_in()), asyncio.create_task(pump_out())]
-    try:
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for t in pending:
-            t.cancel()
-    except (WebSocketDisconnect, RuntimeError):
-        pass
-    finally:
-        for t in tasks:
-            t.cancel()
-        r.clients = max(0, r.clients - 1)
-        if r.clients == 0:
-            r.idle_since = time.time()
-            with r.lock:
-                r.state["online"] = False
-        print(f"[server] room '{room}': device disconnected ({r.clients} left)")
-
-
-@app.post("/api/rooms/{room}/recalibrate")
-def recalibrate(room: str):
-    """Throw away this feed's learned baseline and start learning again.
-
-    scene-baseline assumes the feed starts calm. If warm-up happened while the
-    scene was busy, the detector has learned chaos as normal and will not fire;
-    this is the escape hatch.
-    """
-    worker = WORKERS.get(room)
-    if worker is None:
-        return JSONResponse({"error": f"unknown room {room}"}, status_code=404)
-    worker.reset_baseline()
-    return {"ok": True, "room": room}
+def _page(name):
+    with open(os.path.join(HERE, name), encoding="utf-8") as f:
+        return f.read()
 
 
 @app.get("/camera", response_class=HTMLResponse)
 def camera_page():
-    with open(os.path.join(HERE, "camera.html"), encoding="utf-8") as f:
-        return f.read()
+    return _page("camera.html")
 
 
 @app.get("/ui.css")
@@ -630,5 +461,4 @@ def ui_styles():
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
-    with open(os.path.join(HERE, "dashboard.html"), encoding="utf-8") as f:
-        return f.read()
+    return _page("dashboard.html")
