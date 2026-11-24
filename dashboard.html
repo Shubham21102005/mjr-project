@@ -61,15 +61,55 @@
   .stat .v { font-size:16px; font-weight:600; margin-top:3px; font-variant-numeric:tabular-nums; }
 
   /* ---- live ---- */
-  #grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(360px,1fr)); gap:18px; }
+  .cardhead { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
+  .cardhead h2 { margin:0; }
+  .cardhead .sub { color:var(--muted); font-size:12.5px; }
+
+  details.join { border:1px solid var(--line); border-radius:10px; margin-bottom:18px; background:#0b0e13; }
+  details.join summary { cursor:pointer; padding:11px 14px; font-size:13.5px; font-weight:600; color:var(--accent); }
+  .joinbody { padding:4px 14px 16px; }
+  .joinform { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:10px; align-items:end; }
+  .joinform label { font-size:11.5px; color:var(--muted); display:flex; flex-direction:column; gap:5px; }
+  .joinform .wide { grid-column:1 / -1; }
+  .joinform input { background:var(--bg); border:1px solid var(--line); color:var(--txt); border-radius:7px;
+                    padding:9px 11px; font-size:13.5px; width:100%; }
+  .jhint { font-size:12.5px; color:var(--muted); margin-top:10px; line-height:1.5; }
+  .jhint.bad { color:var(--warn); }
+  .jhint code { background:var(--bg); border:1px solid var(--line); border-radius:4px; padding:1px 5px; }
+  .qr { display:flex; gap:18px; margin-top:14px; flex-wrap:wrap; align-items:flex-start; }
+  .qr[hidden] { display:none; }
+  .qr .code { background:#fff; border-radius:8px; padding:8px; line-height:0; flex:none; }
+  .qr .code svg { width:184px; height:184px; display:block; }
+  .qr .side { flex:1; min-width:220px; font-size:13px; color:var(--muted); line-height:1.5; }
+  .qr .side a { color:var(--txt); word-break:break-all; font-size:12.5px; }
+  .qr ol { margin:10px 0 0; padding-left:18px; }
+
+  .room { margin-bottom:22px; }
+  .room:last-child { margin-bottom:0; }
+  .roomhead { display:flex; align-items:center; gap:10px; margin-bottom:10px; flex-wrap:wrap; }
+  .roomhead .rname { font-weight:700; font-size:15px; }
+  .roomhead .rcount { color:var(--muted); font-size:12.5px; }
+  .roomhead .badge { margin-left:auto; }
+  .room.panic .roomhead .rname { color:var(--panic); }
+
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(340px,100%),1fr)); gap:16px; }
   .cam { background:#0b0e13; border:1px solid var(--line); border-radius:12px; overflow:hidden; transition:box-shadow .2s,border-color .2s; }
   .cam.panic { border-color:var(--panic); box-shadow:0 0 0 2px var(--panic), 0 0 24px rgba(248,81,73,.5); animation:pulse 1s infinite; }
   @keyframes pulse { 50% { box-shadow:0 0 0 2px var(--panic), 0 0 8px rgba(248,81,73,.3); } }
-  .cam .bar { display:flex; align-items:center; justify-content:space-between; padding:10px 14px; border-bottom:1px solid var(--line); }
-  .cam .name { font-weight:600; }
+  .cam .bar { display:flex; align-items:center; gap:8px; padding:10px 14px; border-bottom:1px solid var(--line); }
+  .cam .name { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .cam .kind { font-size:11px; color:var(--muted); border:1px solid var(--line); border-radius:20px; padding:1px 8px; flex:none; }
+  .cam .bar .badge { margin-left:auto; flex:none; }
   .badge { font-size:12px; font-weight:700; padding:4px 10px; border-radius:20px; background:var(--ok); color:#04210d; letter-spacing:.5px; }
   .badge.panic { background:var(--panic); color:#2b0606; }
-  .cam img { width:100%; display:block; background:#000; aspect-ratio:16/10; object-fit:contain; }
+  .badge.learn { background:var(--warn); color:#2a1d00; }
+  .badge.off { background:var(--line); color:var(--muted); }
+  .view { position:relative; background:#000; aspect-ratio:16/10; }
+  .view img { width:100%; height:100%; display:block; object-fit:contain; }
+  .view img[hidden] { display:none; }
+  .view .offline { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+                   background:rgba(11,14,19,.78); color:var(--muted); font-size:13px; }
+  .view .offline[hidden] { display:none; }
   .meta { padding:12px 14px; }
   .row { display:flex; justify-content:space-between; font-size:13px; padding:3px 0; color:var(--muted); }
   .row b { color:var(--txt); font-variant-numeric:tabular-nums; font-weight:500; }
@@ -82,7 +122,7 @@
 <header>
   <span class="dot"></span>
   <h1>Crowd Panic Detection</h1>
-  <span class="sub">upload a clip to analyse · live feeds monitored in real time</span>
+  <span class="sub">upload a clip to analyse · live cameras and phones monitored in real time</span>
   <span class="sub" id="muteWrap" style="margin-left:auto;">
     <label><input type="checkbox" id="mute"> mute alarm</label>
   </span>
@@ -133,11 +173,42 @@
   </section>
 
   <section class="card">
-    <h2>Live feeds</h2>
-    <div id="grid"></div>
+    <div class="cardhead">
+      <h2>Live cameras</h2>
+      <span class="sub" id="liveSum">connecting…</span>
+    </div>
+
+    <details class="join" id="join">
+      <summary>+ Add a phone camera</summary>
+      <div class="joinbody">
+        <div class="joinform">
+          <label>Room <input id="jRoom" value="lobby" maxlength="32" spellcheck="false"></label>
+          <label>Camera name <input id="jCam" maxlength="32" spellcheck="false" placeholder="phone1"></label>
+          <label class="wide">Address the phone will open (must be https)
+            <input id="jBase" spellcheck="false" placeholder="https://xxxx.ngrok-free.app"></label>
+        </div>
+        <div class="jhint" id="jHint"></div>
+        <div class="rowline"><button class="btn" id="jGo" type="button">Show QR code</button></div>
+        <div class="err" id="jErr" style="display:none"></div>
+        <div class="qr" id="jOut" hidden>
+          <div class="code" id="jQr"></div>
+          <div class="side">
+            <a id="jLink" target="_blank" rel="noopener"></a>
+            <div class="rowline" style="margin-top:10px"><button class="btn ghost" id="jCopy" type="button">Copy link</button></div>
+            <ol>
+              <li>Scan this with the phone's camera app and open the link.</li>
+              <li>Tap <b>Start</b> and allow camera access.</li>
+              <li>Prop the phone up so it stays still. It appears here within a second.</li>
+            </ol>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <div id="rooms"></div>
     <div class="empty" id="noRooms" style="display:none">
-      No live feeds configured. Start the server with
-      <code>PANIC_SOURCES="lobby=demo_crowd_30s.avi,webcam=0"</code> to add some.
+      No cameras yet. Add a phone above, or start the server with
+      <code>PANIC_SOURCES="lobby=demo_crowd_30s.avi,lobby/webcam=0"</code> to have it open sources itself.
     </div>
   </section>
 </main>
@@ -367,56 +438,231 @@ function beep() {
   o.start(); o.stop(audioCtx.currentTime + 0.35);
 }
 
-function tile(room) {
-  const el = document.createElement('div');
-  el.className = 'cam'; el.id = 'cam-' + room;
-  el.innerHTML = `
-    <div class="bar"><span class="name">📷 ${room}</span>
-      <span class="badge" id="badge-${room}">NORMAL</span></div>
-    <img src="/video/${room}" alt="${room} feed">
-    <div class="meta">
-      <div class="row"><span>Avg Speed</span><b id="spd-${room}">—</b></div>
-      <div class="row"><span>Flow Entropy</span><b id="ent-${room}">—</b></div>
-      <div class="row"><span>Dir Variance</span><b id="dir-${room}">—</b></div>
-      <div class="row"><span>Occupancy</span><b id="occ-${room}">—</b></div>
-      <div class="row"><span>Persons</span><b id="ppl-${room}">—</b></div>
-      <div class="row"><span>Panic Ratio</span><b id="pr-${room}">—</b></div>
-      <div class="row"><span>Anomaly score</span><b id="sc-${room}">—</b></div>
-      <div class="row"><span class="tag">decision backend</span><span class="tag" id="be-${room}">—</span></div>
-    </div>`;
-  return el;
+// One socket carries everything: JSON state for every room/camera, and each
+// camera's annotated JPEG as a binary message [idLen][id][jpeg].
+const ROOMS = new Map();   // room name -> { el, grid, badge, count }
+const CAMS = new Map();    // "room/cam" -> { el, img, url, fields... }
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
 }
 
-function connect(room) {
-  // ws:// breaks the moment the page is served over HTTPS — match the protocol.
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(`${proto}//${location.host}/ws/${room}`);
-  ws.onmessage = (ev) => {
-    const s = JSON.parse(ev.data), m = s.metrics || {};
-    const panic = s.label === 'PANIC';
-    const badge = $('badge-' + room), cam = $('cam-' + room);
-    badge.textContent = s.label; badge.classList.toggle('panic', panic);
-    cam.classList.toggle('panic', panic);
-    const set = (id, val) => $(id + '-' + room).textContent = val;
-    set('spd', (m.avg_speed ?? 0).toFixed(2) + ' %diag/f');
-    set('ent', (m.flow_entropy ?? 0).toFixed(2) + ' / 3.58');
-    set('dir', (m.direction_variance ?? 0).toFixed(2));
-    set('occ', (m.crowd_density ?? 0).toFixed(3));
-    set('ppl', m.person_count ?? 0);
-    set('pr', (s.panic_ratio ?? 0).toFixed(2));
-    set('sc', s.warming_up ? 'learning baseline…' : (s.score ?? 0).toFixed(1));
-    const be = $('be-' + room);
-    be.textContent = s.degraded ? s.backend + ' (model failed to load)' : s.backend;
-    be.classList.toggle('bad', !!s.degraded);
-    if (panic) beep();
+function makeRoom(name) {
+  const root = el('div', 'room');
+  const head = el('div', 'roomhead');
+  const badge = el('span', 'badge', 'ALL CLEAR');
+  const count = el('span', 'rcount');
+  head.append(el('span', 'rname', name), count, badge);
+  const grid = el('div', 'grid');
+  root.append(head, grid);
+  return { el: root, grid, badge, count };
+}
+
+const METRIC_ROWS = [
+  ['spd', 'Avg Speed'], ['ent', 'Flow Entropy'], ['dir', 'Dir Variance'], ['occ', 'Occupancy'],
+  ['ppl', 'Persons'], ['pr', 'Panic Ratio'], ['sc', 'Anomaly score'], ['fps', 'Analysed'],
+];
+
+function makeCam(s) {
+  const root = el('div', 'cam');
+  const bar = el('div', 'bar');
+  const badge = el('span', 'badge', 'NORMAL');
+  bar.append(el('span', 'name', s.cam), el('span', 'kind', s.kind === 'push' ? 'phone' : 'stream'), badge);
+  const view = el('div', 'view');
+  const img = el('img'); img.alt = s.id + ' feed'; img.hidden = true;   // until the first frame
+  const offline = el('div', 'offline', 'waiting for frames…');
+  view.append(img, offline);
+  const meta = el('div', 'meta');
+  const f = {};
+  METRIC_ROWS.forEach(([k, label]) => {
+    const row = el('div', 'row'); f[k] = el('b', null, '-');
+    row.append(el('span', null, label), f[k]); meta.append(row);
+  });
+  const brow = el('div', 'row'); f.be = el('span', 'tag', '-');
+  brow.append(el('span', 'tag', 'decision backend'), f.be); meta.append(brow);
+  root.append(bar, view, meta);
+  return { el: root, img, offline, badge, f, url: null };
+}
+
+function updateCam(c, s) {
+  const m = s.metrics || {}, panic = s.online && s.label === 'PANIC';
+  c.el.classList.toggle('panic', panic);
+  c.badge.className = 'badge' + (!s.online ? ' off' : panic ? ' panic' : s.warming_up ? ' learn' : '');
+  c.badge.textContent = !s.online ? 'OFFLINE' : s.warming_up ? 'LEARNING' : s.label;
+  c.offline.hidden = s.online && !!c.url;
+  c.offline.textContent = !c.url ? 'waiting for frames…'
+    : s.kind === 'push' ? 'offline: the phone stopped sending' : 'offline: the source stopped producing frames';
+  c.f.spd.textContent = (m.avg_speed ?? 0).toFixed(2) + ' %diag/f';
+  c.f.ent.textContent = (m.flow_entropy ?? 0).toFixed(2) + ' / 3.58';
+  c.f.dir.textContent = (m.direction_variance ?? 0).toFixed(2);
+  c.f.occ.textContent = (m.crowd_density ?? 0).toFixed(3);
+  c.f.ppl.textContent = m.person_count ?? 0;
+  c.f.pr.textContent = (s.panic_ratio ?? 0).toFixed(2);
+  c.f.sc.textContent = s.warming_up ? 'learning baseline…' : (s.score ?? 0).toFixed(1);
+  c.f.fps.textContent = s.online ? (s.fps ?? 0).toFixed(1) + ' fps' : '-';
+  c.f.be.textContent = s.degraded ? s.backend + ' (model failed to load)' : s.backend;
+  c.f.be.classList.toggle('bad', !!s.degraded);
+}
+
+function sameOrder(parent, nodes) {
+  const kids = parent.children;
+  if (kids.length !== nodes.length) return false;
+  return nodes.every((n, i) => kids[i] === n);
+}
+
+let LAST_ROOMS = [];
+function renderState(rooms) {
+  LAST_ROOMS = rooms;
+  const container = $('rooms');
+  const seenRooms = new Set(), seenCams = new Set();
+  let anyAlarm = false, camCount = 0, online = 0;
+
+  rooms.forEach(r => {
+    seenRooms.add(r.room);
+    let R = ROOMS.get(r.room);
+    if (!R) { R = makeRoom(r.room); ROOMS.set(r.room, R); }
+    R.el.classList.toggle('panic', r.alarm);
+    R.badge.className = 'badge' + (r.alarm ? ' panic' : '');
+    R.badge.textContent = r.alarm ? 'PANIC: ' + r.panic_cams.join(', ') : 'ALL CLEAR';
+    const on = r.cameras.filter(s => s.online).length;
+    R.count.textContent = r.cameras.length + (r.cameras.length === 1 ? ' camera' : ' cameras') +
+                          (on < r.cameras.length ? ' (' + on + ' online)' : '');
+    anyAlarm = anyAlarm || r.alarm; camCount += r.cameras.length; online += on;
+
+    const tiles = r.cameras.map(s => {
+      seenCams.add(s.id);
+      let C = CAMS.get(s.id);
+      if (!C) { C = makeCam(s); CAMS.set(s.id, C); }
+      updateCam(C, s);
+      return C.el;
+    });
+    if (!sameOrder(R.grid, tiles)) R.grid.replaceChildren(...tiles);
+  });
+
+  for (const [id, C] of CAMS) if (!seenCams.has(id)) {
+    if (C.url) URL.revokeObjectURL(C.url);
+    C.el.remove(); CAMS.delete(id);
+  }
+  for (const [name, R] of ROOMS) if (!seenRooms.has(name)) { R.el.remove(); ROOMS.delete(name); }
+  const roomEls = rooms.map(r => ROOMS.get(r.room).el);
+  if (!sameOrder(container, roomEls)) container.replaceChildren(...roomEls);
+
+  $('noRooms').style.display = rooms.length ? 'none' : 'block';
+  $('liveSum').textContent = rooms.length
+    ? rooms.length + (rooms.length === 1 ? ' room' : ' rooms') + ' · ' + online + ' of ' + camCount + ' cameras online'
+    : 'no cameras';
+  if (anyAlarm) beep();
+}
+
+function onFrame(buf) {
+  const bytes = new Uint8Array(buf);
+  const n = bytes[0];
+  const id = new TextDecoder().decode(bytes.subarray(1, 1 + n));
+  const C = CAMS.get(id);
+  if (!C) return;
+  const url = URL.createObjectURL(new Blob([bytes.subarray(1 + n)], { type: 'image/jpeg' }));
+  const old = C.url;
+  C.url = url;
+  C.img.onload = () => {
+    if (old) URL.revokeObjectURL(old);
+    if (C.img.hidden) { C.img.hidden = false; C.offline.hidden = true; }
   };
-  ws.onclose = () => setTimeout(() => connect(room), 1500);
+  C.img.src = url;
 }
 
-fetch('/rooms').then(r => r.json()).then(d => {
-  const grid = $('grid');
-  if (!d.rooms.length) { $('noRooms').style.display = 'block'; return; }
-  d.rooms.forEach(room => { grid.appendChild(tile(room)); connect(room); });
+function connectLive() {
+  // ws:// breaks the moment the page is served over HTTPS; match the protocol.
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${proto}//${location.host}/ws/live`);
+  ws.binaryType = 'arraybuffer';
+  ws.onmessage = ev => {
+    if (typeof ev.data === 'string') {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === 'state') renderState(msg.rooms);
+    } else {
+      onFrame(ev.data);
+    }
+  };
+  ws.onclose = () => { $('liveSum').textContent = 'reconnecting…'; setTimeout(connectLive, 1500); };
+}
+connectLive();
+
+// ---------------------------------------------------------- add phone camera
+const isLocalHost = h => h === 'localhost' || h === '127.0.0.1' || h === '[::1]';
+let baseTouched = false;
+
+async function refreshBase() {
+  if (baseTouched) return;
+  let pub = null;
+  try { pub = (await (await fetch('/api/rooms')).json()).public_url; } catch (e) {}
+  // If this dashboard is itself being viewed through the tunnel, that's the address.
+  if (!pub && !isLocalHost(location.hostname)) pub = location.origin;
+  if (pub && $('jBase').value !== pub) $('jBase').value = pub;
+  hintBase();
+}
+
+function hintBase() {
+  const v = $('jBase').value.trim(), h = $('jHint');
+  if (!v) {
+    h.className = 'jhint bad';
+    h.innerHTML = 'No public address yet. Phones only allow camera access over HTTPS, so run ' +
+      '<code>ngrok http 8000</code> in another terminal (the address fills in here automatically), ' +
+      'or <code>cloudflared tunnel --url http://localhost:8000</code> and paste its https address.';
+  } else if (!/^https:\/\//i.test(v)) {
+    h.className = 'jhint bad';
+    h.textContent = 'This address is plain http. A phone browser will refuse to open its camera on it; use the https address of a tunnel.';
+  } else {
+    h.className = 'jhint';
+    h.textContent = 'Phones will connect through ' + v + '. The link carries this server\'s access token, so only share it with devices you trust.';
+  }
+}
+
+const ISSUED = new Set();   // "room/cam" names already handed out as QR codes
+function nextCamName(room) {
+  const r = LAST_ROOMS.find(x => x.room === room);
+  const used = new Set((r ? r.cameras : []).map(c => c.cam));
+  for (let i = 1; ; i++) {
+    const name = 'phone' + i;
+    if (!used.has(name) && !ISSUED.has(room + '/' + name)) return name;
+  }
+}
+
+$('join').addEventListener('toggle', () => { if ($('join').open) refreshBase(); });
+setInterval(() => { if ($('join').open && !$('jBase').value) refreshBase(); }, 3000);
+$('jBase').addEventListener('input', () => { baseTouched = true; hintBase(); });
+
+$('jGo').addEventListener('click', async () => {
+  const room = $('jRoom').value.trim();
+  if (!$('jCam').value.trim()) $('jCam').value = nextCamName(room);
+  const cam = $('jCam').value.trim();
+  const q = new URLSearchParams({ room, cam, base: $('jBase').value.trim() });
+  $('jErr').style.display = 'none';
+  let d;
+  try {
+    const res = await fetch('/api/join?' + q);
+    d = await res.json();
+    if (!res.ok) throw new Error(d.error || ('HTTP ' + res.status));
+  } catch (e) {
+    $('jOut').hidden = true;
+    $('jErr').textContent = e.message; $('jErr').style.display = 'block';
+    return;
+  }
+  $('jQr').innerHTML = d.svg;               // generated server-side by the qrcode library
+  $('jLink').href = d.url; $('jLink').textContent = d.url;
+  $('jOut').hidden = false;
+  // Clear the name so the next QR gets a fresh one instead of colliding with this phone.
+  ISSUED.add(room + '/' + cam);
+  $('jCam').value = '';
+  $('jCam').placeholder = nextCamName(room);
+});
+
+$('jCopy').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText($('jLink').href); $('jCopy').textContent = 'Copied'; }
+  catch (e) { $('jCopy').textContent = 'Copy failed'; }
+  setTimeout(() => $('jCopy').textContent = 'Copy link', 1500);
 });
 </script>
 </body>

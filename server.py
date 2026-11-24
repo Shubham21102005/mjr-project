@@ -9,43 +9,53 @@ Two modes, both served from the same page:
   the detector gets demonstrated: you cannot stage real panic in front of a live
   camera, so a recorded clip is the honest way to show it working.
 
-  LIVE — each "room" is one camera feed (a webcam index or a file path the
-  server can open). A background worker thread per room runs the same pipeline
-  and publishes the latest annotated JPEG + state; the page streams each as
-  MJPEG and receives labels/metrics over a WebSocket, flashing red and sounding
-  an alarm on PANIC.
+  LIVE (multi-camera) - a ROOM is a named group of CAMERAS. Cameras are either
+  pulled by the server (PANIC_SOURCES: webcam index, file, stream URL) or
+  pushed in by devices: a phone opens /camera, and its browser streams JPEG
+  frames over WS /ws/ingest/{room}/{cam}. Two threads serve every camera: one
+  runs the analysis pipeline at a steady rate, the other batches person
+  detection across cameras (see live.py). The dashboard gets every camera's
+  state and annotated frames over a single WebSocket (/ws/live), and a room
+  alarms when any of its cameras is in PANIC.
 
-Live rooms are opt-in via the PANIC_SOURCES env var (comma-separated
-name=source), because there is no sensible default camera to point at:
-    PANIC_SOURCES="lobby=demo_crowd_30s.avi,webcam=0"
+Pulled sources are opt-in via PANIC_SOURCES (comma-separated `room=source` or
+`room/cam=source`):
+    PANIC_SOURCES="lobby=demo_crowd_30s.avi,lobby/door=0"
+
+Phones need HTTPS for camera access, so put the server behind a tunnel:
+    ngrok http 8000            (or: cloudflared tunnel --url http://localhost:8000)
+Requests that come through a tunnel or from another device must carry the
+access token (PANIC_TOKEN, or a random one printed at startup); see auth.py.
 
 Run:
-    venv/Scripts/uvicorn server:app --host 127.0.0.1 --port 8000   # Windows
-    venv/bin/uvicorn server:app --host 127.0.0.1 --port 8000       # macOS/Linux
+    venv/Scripts/python -m uvicorn server:app --host 127.0.0.1 --port 8000   # Windows
+    venv/bin/python -m uvicorn server:app --host 127.0.0.1 --port 8000       # macOS/Linux
 Then open http://localhost:8000
 """
 import asyncio
+import io
+import json
 import os
-import shutil
 import threading
 import time
+import urllib.parse
+import urllib.request
 import uuid
 from contextlib import asynccontextmanager
 
-import cv2
 import numpy as np
+import cv2
+import qrcode
+import qrcode.image.svg
 from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
 from ultralytics import YOLO
 
+import live
 from analyze import analyze_video
-from classifier import PanicClassifier
-from detect import extract_boxes, draw_hud
-from metrics import compute_metrics
+from auth import TokenGate, load_token
 from video_writer import ffmpeg_available
 
-FLOW_SCALE = 0.5
-CONF = 0.4
 MODEL_WEIGHTS = os.environ.get("PANIC_MODEL", "yolov8n.pt")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -111,108 +121,48 @@ def _run_analysis(job_id, src_path, out_path):
                  result=result)
 
 
+# --------------------------------------------------------------------------- #
+# Live cameras: registry + scheduler (see live.py), access token (see auth.py)
+# --------------------------------------------------------------------------- #
+
+REGISTRY = live.Registry()
+SCHEDULER = DETECTOR = None
+ACCESS_TOKEN, TOKEN_GENERATED = load_token()
+
+MAX_FRAME_BYTES = 2 * 1024 * 1024        # one pushed JPEG; 640px at q0.6 is ~40 KB
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global SCHEDULER, DETECTOR
     os.makedirs(UPLOAD_DIR, exist_ok=True)
-    for room, src in parse_sources().items():
-        w = CameraWorker(room, src)
-        w.start()
-        WORKERS[room] = w
-    print(f"[server] live rooms: {list(WORKERS) or '(none — set PANIC_SOURCES to add some)'}")
+
+    # Empty by default: there is no sensible default feed, and a source that
+    # isn't there just shows up as a permanently dead tile.
+    for room, cam, src in live.parse_sources(os.environ.get("PANIC_SOURCES", "")):
+        try:
+            REGISTRY.add_pull(room, cam, src)
+        except (ValueError, live.CameraInUse) as e:
+            print(f"[server] skipping PANIC_SOURCES entry {room}/{cam}: {e}")
+    SCHEDULER = live.Scheduler(REGISTRY)
+    DETECTOR = live.Detector(REGISTRY, _yolo)
+    SCHEDULER.start()
+    DETECTOR.start()
+
+    pulled = [c.id for c in REGISTRY.cameras()]
+    print(f"[server] pulled cameras: {pulled or '(none; phones can still join via /camera)'}")
+    print(f"[server] access token for phones / tunnel: {ACCESS_TOKEN}"
+          + ("  (random per run; set PANIC_TOKEN to keep it fixed)" if TOKEN_GENERATED else ""))
     if not ffmpeg_available():
         print("[server] WARNING: ffmpeg not on PATH; annotated clips may not play in the browser")
     yield
-    for w in WORKERS.values():
-        w.running = False
-
-
-# --------------------------------------------------------------------------- #
-# Live camera rooms
-# --------------------------------------------------------------------------- #
-
-class CameraWorker(threading.Thread):
-    """Reads a source, runs the pipeline, and publishes latest frame + state."""
-
-    def __init__(self, room, source):
-        super().__init__(daemon=True)
-        self.room = room
-        self.source = int(source) if str(source).isdigit() else source
-        self.is_file = not str(source).isdigit()
-        self.classifier = PanicClassifier()
-        self.lock = threading.Lock()
-        self.latest_jpeg = None
-        self.state = {"room": room, "label": "NORMAL", "panic_ratio": 0.0,
-                      "backend": self.classifier.backend,
-                      "degraded": self.classifier.degraded,
-                      "metrics": {}, "online": False}
-        self.running = True
-
-    def snapshot(self):
-        with self.lock:
-            return dict(self.state)
-
-    def run(self):
-        cap = cv2.VideoCapture(self.source)
-        prev = None
-        metrics, label, flow = {}, "NORMAL", None
-        while self.running:
-            ret, frame = cap.read()
-            if not ret:
-                if self.is_file:                       # loop video files for a live demo
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    prev = None
-                    continue
-                time.sleep(0.2)
-                continue
-
-            if len(frame.shape) == 2:
-                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-            H, W = frame.shape[:2]
-
-            boxes = extract_boxes(_yolo(frame, classes=[0], verbose=False), CONF)
-            small = cv2.resize(frame, (0, 0), fx=FLOW_SCALE, fy=FLOW_SCALE)
-            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-            if prev is not None:
-                flow = cv2.calcOpticalFlowFarneback(prev, gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
-                metrics = compute_metrics(flow, boxes, (H, W))
-                label = self.classifier.update(metrics)
-            prev = gray
-
-            disp = draw_hud(frame.copy(), boxes, flow, metrics, label,
-                            self.classifier.panic_ratio(), FLOW_SCALE, False)
-            ok, buf = cv2.imencode(".jpg", disp, [cv2.IMWRITE_JPEG_QUALITY, 75])
-            if ok:
-                with self.lock:
-                    self.latest_jpeg = buf.tobytes()
-                    self.state = {
-                        "room": self.room, "label": label,
-                        "panic_ratio": round(self.classifier.panic_ratio(), 2),
-                        "backend": self.classifier.backend,
-                        "degraded": self.classifier.degraded,
-                        "score": round(self.classifier.anomaly_score, 2),
-                        "warming_up": self.classifier.warming_up,
-                        "metrics": {k: round(float(v), 3) for k, v in metrics.items()},
-                        "online": True,
-                    }
-        cap.release()
-
-
-def parse_sources():
-    """Live rooms from PANIC_SOURCES. Empty by default — there is no sensible
-    default feed, and a room pointing at a file that isn't there just shows up
-    as a permanently dead tile."""
-    raw = os.environ.get("PANIC_SOURCES", "").strip()
-    rooms = {}
-    for part in raw.split(","):
-        if "=" in part:
-            name, src = part.split("=", 1)
-            if name.strip() and src.strip():
-                rooms[name.strip()] = src.strip()
-    return rooms
+    SCHEDULER.running = False
+    DETECTOR.running = False
+    REGISTRY.stop()
 
 
 app = FastAPI(title="Crowd Panic Detection", lifespan=lifespan)
-WORKERS = {}
+app.add_middleware(TokenGate, token=ACCESS_TOKEN)
 
 
 # --------------------------------------------------------------------------- #
@@ -329,42 +279,181 @@ def delete_job(job_id: str):
 # Live API
 # --------------------------------------------------------------------------- #
 
-@app.get("/rooms")
-def rooms():
-    return {"rooms": list(WORKERS), "ffmpeg": ffmpeg_available()}
+_ngrok_cache = {"t": 0.0, "url": None}
 
 
-@app.get("/video/{room}")
-def video(room: str):
-    worker = WORKERS.get(room)
-    if worker is None:
-        return HTMLResponse(f"unknown room {room}", status_code=404)
+def detect_public_url():
+    """The HTTPS address phones should use: PANIC_PUBLIC_URL if set, otherwise
+    whatever a locally running ngrok agent reports on its inspection API."""
+    env = os.environ.get("PANIC_PUBLIC_URL", "").strip().rstrip("/")
+    if env:
+        return env
+    now = time.monotonic()
+    if now - _ngrok_cache["t"] < 5.0:
+        return _ngrok_cache["url"]
+    url = None
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:4040/api/tunnels", timeout=0.4) as r:
+            tunnels = json.load(r).get("tunnels", [])
+        https = [t["public_url"] for t in tunnels
+                 if str(t.get("public_url", "")).startswith("https://")]
+        url = https[0] if https else None
+    except Exception:
+        url = None
+    _ngrok_cache.update(t=now, url=url)
+    return url
 
-    def gen():
-        boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+
+@app.get("/api/rooms")
+def api_rooms():
+    return {"rooms": REGISTRY.snapshot(), "ffmpeg": ffmpeg_available(),
+            "public_url": detect_public_url(), "live_fps": live.LIVE_FPS}
+
+
+@app.get("/api/join")
+def api_join(room: str, cam: str, base: str = ""):
+    """The link (and its QR code) a phone opens to join room/cam."""
+    if not (live.valid_name(room) and live.valid_name(cam)):
+        return JSONResponse({"error": "room and camera names may use letters, digits, "
+                                      "'-' and '_' (max 32)"}, status_code=400)
+    base = (base or detect_public_url() or "").strip().rstrip("/")
+    parsed = urllib.parse.urlparse(base)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return JSONResponse({"error": "no public URL: start a tunnel (ngrok http 8000) "
+                                      "or enter the address phones should use"},
+                            status_code=400)
+    query = urllib.parse.urlencode({"room": room, "cam": cam, "token": ACCESS_TOKEN})
+    url = f"{parsed.scheme}://{parsed.netloc}/camera?{query}"
+    img = qrcode.make(url, image_factory=qrcode.image.svg.SvgPathImage, box_size=8, border=2)
+    buf = io.BytesIO()
+    img.save(buf)
+    return {"url": url, "svg": buf.getvalue().decode("utf-8"),
+            "secure": parsed.scheme == "https"
+                      or parsed.hostname in ("localhost", "127.0.0.1")}
+
+
+@app.websocket("/ws/ingest/{room}/{cam}")
+async def ingest(websocket: WebSocket, room: str, cam: str):
+    """A device pushes its camera into room/cam.
+
+    Protocol: the device sends one binary JPEG frame, the server replies with a
+    JSON ack carrying this camera's label and the room's alarm, then the device
+    sends the next frame. Waiting for the ack is the device's backpressure: on a
+    slow uplink it sends less often instead of piling up seconds of lag.
+
+    Text messages are control messages: {"type": "reset"} asks the server to
+    relearn this camera's baseline (the phone sends it after switching between
+    front and back camera, since that is a different scene).
+    """
+    await websocket.accept()
+    try:
+        camera, gen = REGISTRY.attach_push(room, cam)
+    except ValueError as e:
+        await websocket.close(code=4400, reason=str(e))
+        return
+    except live.CameraInUse as e:
+        await websocket.close(code=4409, reason=str(e))
+        return
+
+    print(f"[server] camera joined: {camera.id}")
+    try:
         while True:
-            frame = worker.latest_jpeg
+            msg = await websocket.receive()
+            if msg["type"] == "websocket.disconnect":
+                break
+            if camera.conn_gen != gen:
+                # A newer connection from this device took over (see attach_push).
+                await websocket.close(code=4409, reason="replaced by a newer connection")
+                break
+            data = msg.get("bytes")
+            if data is None:
+                try:
+                    if json.loads(msg.get("text") or "{}").get("type") == "reset":
+                        camera.reset()
+                except (ValueError, AttributeError):
+                    pass
+                continue
+            if len(data) > MAX_FRAME_BYTES:
+                await websocket.close(code=4413, reason="frame too large")
+                break
+            frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
             if frame is not None:
-                yield boundary + frame + b"\r\n"
-            time.sleep(0.04)
+                camera.slot.put(frame)
+            s = camera.snapshot()
+            panic_cams = REGISTRY.room_alarm(room)
+            await websocket.send_json({
+                "label": s["label"], "score": s["score"], "warming_up": s["warming_up"],
+                "fps": s["fps"], "room_alarm": bool(panic_cams), "panic_cams": panic_cams,
+                "decoded": frame is not None,
+            })
+    except (WebSocketDisconnect, OSError, RuntimeError):
+        pass
+    finally:
+        REGISTRY.detach_push(camera, gen)
+        print(f"[server] camera left: {camera.id}")
+
+
+@app.websocket("/ws/live")
+async def live_feed(websocket: WebSocket):
+    """Everything the dashboard needs on ONE socket: JSON state for all rooms
+    (~5x/s) and each camera's annotated JPEG whenever it changes.
+
+    Frames go over this WebSocket instead of one MJPEG <img> per camera because
+    browsers allow only ~6 concurrent HTTP/1.1 connections per host: with
+    MJPEG, a 7th camera would never load and would also block every fetch().
+
+    Binary message layout: [1 byte id length][camera id, utf-8][jpeg bytes].
+    """
+    await websocket.accept()
+    sent = {}
+    last_state = 0.0
+    try:
+        while True:
+            now = time.monotonic()
+            if now - last_state >= 0.2:
+                await websocket.send_json({"type": "state", "rooms": REGISTRY.snapshot()})
+                last_state = now
+            for camera in REGISTRY.cameras():
+                seq, jpeg = camera.latest_jpeg()
+                if jpeg is not None and sent.get(camera.id) != seq:
+                    sent[camera.id] = seq
+                    cid = camera.id.encode("utf-8")
+                    await websocket.send_bytes(bytes([len(cid)]) + cid + jpeg)
+            await asyncio.sleep(0.03)
+    except (WebSocketDisconnect, OSError, RuntimeError):
+        pass
+
+
+@app.get("/video/{room}/{cam}")
+async def video(room: str, cam: str):
+    """MJPEG for one camera, for viewing a single feed directly (or in VLC)."""
+    camera = REGISTRY.get(room, cam)
+    if camera is None:
+        return HTMLResponse(f"unknown camera {room}/{cam}", status_code=404)
+
+    async def gen():
+        boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+        last = None
+        while REGISTRY.get(room, cam) is camera:
+            seq, jpeg = camera.latest_jpeg()
+            if jpeg is not None and seq != last:
+                last = seq
+                yield boundary + jpeg + b"\r\n"
+            await asyncio.sleep(0.03)
 
     return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
-@app.websocket("/ws/{room}")
-async def ws(websocket: WebSocket, room: str):
-    await websocket.accept()
-    worker = WORKERS.get(room)
-    try:
-        while True:
-            if worker is not None:
-                await websocket.send_json(worker.snapshot())
-            await asyncio.sleep(0.2)
-    except WebSocketDisconnect:
-        pass
+def _page(name):
+    with open(os.path.join(HERE, name), encoding="utf-8") as f:
+        return f.read()
+
+
+@app.get("/camera", response_class=HTMLResponse)
+def camera_page():
+    return _page("camera.html")
 
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
-    with open(os.path.join(HERE, "dashboard.html"), encoding="utf-8") as f:
-        return f.read()
+    return _page("dashboard.html")

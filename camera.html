@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1117">
+<title>Panic Camera</title>
+<style>
+  :root { --bg:#0e1117; --panel:#161b22; --line:#232a34; --txt:#e6edf3; --muted:#8b949e;
+          --ok:#2ea043; --panic:#f85149; --accent:#388bfd; --warn:#d29922; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; background:var(--bg); color:var(--txt);
+               font-family:-apple-system,Segoe UI,Roboto,sans-serif; }
+  body { min-height:100vh; min-height:100dvh; padding:env(safe-area-inset-top) 16px 24px; }
+  body.alarm { animation:flash .8s infinite; }
+  @keyframes flash { 50% { background:#3a0d0b; } }
+
+  header { display:flex; align-items:center; gap:10px; padding:14px 0 12px; }
+  header h1 { font-size:17px; margin:0; font-weight:600; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--muted); flex:none; }
+  .dot.on { background:var(--ok); box-shadow:0 0 8px var(--ok); }
+  .dot.wait { background:var(--warn); box-shadow:0 0 8px var(--warn); }
+  #conn { color:var(--muted); font-size:13px; margin-left:auto; text-align:right; }
+
+  .stage { position:relative; border-radius:12px; overflow:hidden; background:#000;
+           border:1px solid var(--line); aspect-ratio:4/3; }
+  .stage.panic { border-color:var(--panic); box-shadow:0 0 0 2px var(--panic); }
+  video { width:100%; height:100%; object-fit:contain; display:block; background:#000; }
+  .idle { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+          color:var(--muted); font-size:14px; text-align:center; padding:20px; }
+  .idle[hidden] { display:none; }
+  .badge { position:absolute; top:10px; left:10px; font-size:13px; font-weight:700; padding:5px 12px;
+           border-radius:20px; background:var(--ok); color:#04210d; letter-spacing:.5px; }
+  .badge.panic { background:var(--panic); color:#2b0606; }
+  .badge.learn { background:var(--warn); color:#2a1d00; }
+  .badge[hidden] { display:none; }
+
+  .banner { margin-top:12px; padding:12px 14px; border-radius:10px; font-weight:700; font-size:15px;
+            background:var(--panic); color:#2b0606; text-align:center; }
+  .banner[hidden] { display:none; }
+
+  form { margin-top:16px; display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  label { font-size:12px; color:var(--muted); display:flex; flex-direction:column; gap:5px; }
+  input[type=text] { background:#0b0e13; border:1px solid var(--line); color:var(--txt); border-radius:8px;
+          padding:11px 12px; font-size:16px; width:100%; }
+  input[type=text]:disabled { opacity:.55; }
+  .btns { grid-column:1 / -1; display:flex; gap:10px; }
+  .btn { flex:1; background:var(--accent); color:#fff; border:0; border-radius:9px; padding:13px 16px;
+         font-size:15px; font-weight:600; cursor:pointer; }
+  .btn.stop { background:var(--panic); color:#2b0606; }
+  .btn.ghost { flex:none; background:transparent; border:1px solid var(--line); color:var(--txt); }
+  .btn:disabled { opacity:.45; cursor:not-allowed; }
+
+  .stats { margin-top:14px; display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+  .stat { background:#0b0e13; border:1px solid var(--line); border-radius:8px; padding:9px 10px; min-width:0; }
+  .stat .k { font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+  .stat .v { font-size:15px; font-weight:600; margin-top:2px; font-variant-numeric:tabular-nums;
+             white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+  .msg { margin-top:14px; font-size:13.5px; line-height:1.45; padding:11px 13px; border-radius:9px; }
+  .msg.err { background:rgba(248,81,73,.12); border:1px solid rgba(248,81,73,.45); color:#ffb4b0; }
+  .msg.info { color:var(--muted); border:1px solid var(--line); }
+  .msg[hidden] { display:none; }
+  .opts { margin-top:12px; font-size:13px; color:var(--muted); display:flex; gap:16px; flex-wrap:wrap; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>Panic Camera</h1>
+  <span id="conn">not streaming</span>
+</header>
+
+<div class="stage" id="stage">
+  <video id="video" playsinline muted autoplay></video>
+  <div class="idle" id="idle">Pick a room and a name for this camera, then tap Start.</div>
+  <span class="badge" id="badge" hidden>NORMAL</span>
+</div>
+<div class="banner" id="banner" hidden>PANIC in this room</div>
+
+<form id="form" autocomplete="off">
+  <label>Room <input type="text" id="room" maxlength="32" spellcheck="false" autocapitalize="off"></label>
+  <label>Camera name <input type="text" id="cam" maxlength="32" spellcheck="false" autocapitalize="off"></label>
+  <div class="btns">
+    <button class="btn" id="start" type="submit">Start</button>
+    <button class="btn ghost" id="flip" type="button" disabled>Flip</button>
+  </div>
+</form>
+
+<div class="opts"><label style="flex-direction:row;align-items:center;gap:6px">
+  <input type="checkbox" id="mute"> mute alarm</label></div>
+
+<div class="stats">
+  <div class="stat"><div class="k">Sending</div><div class="v" id="sfps">-</div></div>
+  <div class="stat"><div class="k">Analysed</div><div class="v" id="afps">-</div></div>
+  <div class="stat"><div class="k">Upload</div><div class="v" id="kbps">-</div></div>
+</div>
+
+<div class="msg err" id="err" hidden></div>
+<div class="msg info" id="tip">
+  Prop the phone up or mount it so it stays still. A handheld camera shakes, and the
+  detector reads that shake as crowd movement. The first ~10 seconds are spent learning
+  what calm looks like here, so start while the scene is calm.
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+const TOKEN = params.get('token') || '';
+const FPS = Math.min(30, Math.max(1, Number(params.get('fps')) || 10));
+const LONG_SIDE = 640, QUALITY = 0.6;
+const NAME_RE = /^[A-Za-z0-9_-]{1,32}$/;
+
+function store(k, v) { try { v === undefined ? 0 : localStorage.setItem(k, v); return localStorage.getItem(k); } catch (e) { return null; } }
+function randomName() { return 'phone-' + Math.random().toString(36).slice(2, 6); }
+
+$('room').value = params.get('room') || store('panic.room') || 'lobby';
+$('cam').value = params.get('cam') || store('panic.cam') || randomName();
+
+const video = $('video');
+const canvas = document.createElement('canvas');
+const ctx = canvas.getContext('2d');
+
+let running = false, stream = null, ws = null, facing = 'environment';
+let inflight = false, sentAt = 0, nextTimer = null, ackTimer = null, retryTimer = null;
+let wakeLock = null, audio = null, lastBeep = 0, everConnected = false;
+let winFrames = 0, winBytes = 0, winStart = performance.now();
+
+function showErr(text) { $('err').textContent = text; $('err').hidden = !text; }
+function setConn(text, cls) { $('conn').textContent = text; $('dot').className = 'dot' + (cls ? ' ' + cls : ''); }
+
+if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+  showErr('This page needs HTTPS to use the camera. Open it with the https:// link or QR code ' +
+          'shown on the dashboard (start a tunnel such as "ngrok http 8000" on the server first).');
+  $('start').disabled = true;
+}
+
+// ------------------------------------------------------------------ camera
+async function openCamera() {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 },
+             frameRate: { ideal: Math.max(FPS, 15) } },
+  });
+  video.srcObject = stream;
+  await video.play().catch(() => {});
+  $('idle').hidden = true;
+}
+
+async function keepAwake() {
+  try { if ('wakeLock' in navigator && document.visibilityState === 'visible') wakeLock = await navigator.wakeLock.request('screen'); }
+  catch (e) { /* not fatal: the screen may just dim */ }
+}
+
+// ---------------------------------------------------------------- streaming
+function wsUrl() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const room = encodeURIComponent($('room').value), cam = encodeURIComponent($('cam').value);
+  return `${proto}//${location.host}/ws/ingest/${room}/${cam}?token=${encodeURIComponent(TOKEN)}`;
+}
+
+function connect() {
+  clearTimeout(retryTimer);
+  setConn('connecting…', 'wait');
+  ws = new WebSocket(wsUrl());
+  ws.onopen = () => { everConnected = true; inflight = false; showErr(''); setConn('streaming', 'on'); sendFrame(); };
+  ws.onmessage = ev => onAck(JSON.parse(ev.data));
+  ws.onclose = ev => {
+    clearTimeout(ackTimer); clearTimeout(nextTimer); inflight = false;
+    if (!running) return;
+    if (ev.code === 4401) return fail('The access token is missing or wrong. Reopen this page from the QR code on the dashboard (the token changes when the server restarts unless PANIC_TOKEN is set).');
+    if (ev.code === 4400) return fail('Room and camera names may only use letters, digits, "-" and "_".');
+    if (ev.code === 4409 && !everConnected) return fail('Another device is already streaming as "' + $('cam').value + '" in this room. Pick a different camera name.');
+    if (ev.code === 4409) return fail('This camera was taken over by a newer connection (is this page open twice?).');
+    setConn('reconnecting…', 'wait');
+    retryTimer = setTimeout(connect, 1500);
+  };
+}
+
+function schedule(ms) { clearTimeout(nextTimer); nextTimer = setTimeout(sendFrame, ms); }
+
+function sendFrame() {
+  if (!running || !ws || ws.readyState !== WebSocket.OPEN || inflight) return;
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return schedule(100);
+  const s = Math.min(1, LONG_SIDE / Math.max(vw, vh));
+  canvas.width = Math.round(vw * s); canvas.height = Math.round(vh * s);
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  inflight = true; sentAt = performance.now();
+  canvas.toBlob(blob => {
+    if (!blob || !ws || ws.readyState !== WebSocket.OPEN) { inflight = false; return schedule(200); }
+    ws.send(blob);
+    winFrames++; winBytes += blob.size;
+    // If the server stops answering, the socket is dead even if it looks open.
+    clearTimeout(ackTimer);
+    ackTimer = setTimeout(() => { try { ws.close(); } catch (e) {} }, 8000);
+  }, 'image/jpeg', QUALITY);
+}
+
+function onAck(a) {
+  clearTimeout(ackTimer);
+  inflight = false;
+  schedule(Math.max(0, 1000 / FPS - (performance.now() - sentAt)));
+
+  const badge = $('badge');
+  badge.hidden = false;
+  badge.textContent = a.warming_up ? 'LEARNING CALM…' : a.label;
+  badge.className = 'badge' + (a.label === 'PANIC' ? ' panic' : a.warming_up ? ' learn' : '');
+  $('stage').classList.toggle('panic', a.label === 'PANIC');
+
+  const others = (a.panic_cams || []).filter(c => c !== $('cam').value);
+  $('banner').hidden = !a.room_alarm;
+  $('banner').textContent = a.label === 'PANIC'
+    ? 'PANIC detected by this camera' + (others.length ? ' and ' + others.join(', ') : '')
+    : 'PANIC in this room: ' + others.join(', ');
+  document.body.classList.toggle('alarm', !!a.room_alarm);
+  if (a.room_alarm) alarm();
+
+  $('afps').textContent = a.fps ? a.fps.toFixed(1) + ' fps' : '-';
+  const now = performance.now(), dt = (now - winStart) / 1000;
+  if (dt >= 1) {
+    $('sfps').textContent = (winFrames / dt).toFixed(1) + ' fps';
+    $('kbps').textContent = Math.round(winBytes / dt / 1024) + ' KB/s';
+    winFrames = 0; winBytes = 0; winStart = now;
+  }
+}
+
+function alarm() {
+  const now = Date.now();
+  if (now - lastBeep < 1200) return;
+  lastBeep = now;
+  if (navigator.vibrate) navigator.vibrate([300, 120, 300]);
+  if ($('mute').checked || !audio) return;
+  const o = audio.createOscillator(), g = audio.createGain();
+  o.type = 'square'; o.frequency.value = 880;
+  o.connect(g); g.connect(audio.destination);
+  g.gain.setValueAtTime(0.15, audio.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.35);
+  o.start(); o.stop(audio.currentTime + 0.35);
+}
+
+// ------------------------------------------------------------- start / stop
+async function start() {
+  const room = $('room').value.trim(), cam = $('cam').value.trim();
+  $('room').value = room; $('cam').value = cam;
+  if (!NAME_RE.test(room) || !NAME_RE.test(cam))
+    return showErr('Room and camera names may only use letters, digits, "-" and "_" (max 32).');
+  showErr('');
+  store('panic.room', room); store('panic.cam', cam);
+  // Audio must be unlocked inside the tap, or the alarm stays silent on iOS.
+  try { audio = audio || new (window.AudioContext || window.webkitAudioContext)(); audio.resume(); } catch (e) {}
+  try { await openCamera(); }
+  catch (e) {
+    return showErr(e.name === 'NotAllowedError'
+      ? 'Camera permission was denied. Allow camera access for this site in the browser settings, then tap Start again.'
+      : 'Could not open the camera: ' + (e.message || e.name));
+  }
+  running = true; everConnected = false;
+  setUi();
+  keepAwake();
+  connect();
+}
+
+function stop() {
+  running = false;
+  clearTimeout(nextTimer); clearTimeout(ackTimer); clearTimeout(retryTimer);
+  if (ws) { try { ws.close(1000); } catch (e) {} ws = null; }
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  video.srcObject = null;
+  if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+  $('idle').hidden = false; $('badge').hidden = true; $('banner').hidden = true;
+  $('stage').classList.remove('panic'); document.body.classList.remove('alarm');
+  ['sfps', 'afps', 'kbps'].forEach(id => $(id).textContent = '-');
+  setConn('not streaming', '');
+  setUi();
+}
+
+function fail(text) { stop(); showErr(text); }
+
+function setUi() {
+  $('start').textContent = running ? 'Stop' : 'Start';
+  $('start').classList.toggle('stop', running);
+  $('flip').disabled = !running;
+  $('room').disabled = running; $('cam').disabled = running;
+}
+
+$('form').addEventListener('submit', e => { e.preventDefault(); running ? stop() : start(); });
+
+$('flip').addEventListener('click', async () => {
+  facing = facing === 'environment' ? 'user' : 'environment';
+  try { await openCamera(); } catch (e) { return showErr('Could not switch camera: ' + (e.message || e.name)); }
+  // The other lens sees a different scene, so its calm baseline must be relearned.
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'reset' }));
+});
+
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState !== 'visible' || !running) return;
+  keepAwake();
+  // Mobile browsers stop the camera when the page is backgrounded.
+  const track = stream && stream.getVideoTracks()[0];
+  if (!track || track.readyState === 'ended') {
+    try { await openCamera(); } catch (e) { return fail('The camera stopped and could not be reopened.'); }
+  }
+  if (!ws || ws.readyState === WebSocket.CLOSED) connect();
+});
+</script>
+</body>
+</html>

@@ -12,3 +12,7 @@ scikit-learn>=1.9.0
 # Web dashboard (server.py)
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
+# Required by FastAPI for the multipart upload endpoint (POST /api/upload).
+python-multipart>=0.0.9
+# QR codes on the dashboard for joining a phone camera to a room (/api/join).
+qrcode>=7.4
