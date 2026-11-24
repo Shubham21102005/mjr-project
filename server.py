@@ -115,10 +115,11 @@ def _run_analysis(job_id, src_path, out_path):
 async def lifespan(app: FastAPI):
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     for room, src in parse_sources().items():
-        w = CameraWorker(room, src)
+        w = PullRoom(room, src)
         w.start()
         WORKERS[room] = w
-    print(f"[server] live rooms: {list(WORKERS) or '(none — set PANIC_SOURCES to add some)'}")
+    print(f"[server] pull rooms: {list(WORKERS) or '(none)'}  "
+          f"(push rooms are created on demand from /camera)")
     if not ffmpeg_available():
         print("[server] WARNING: ffmpeg not on PATH; annotated clips may not play in the browser")
     yield
@@ -127,78 +128,200 @@ async def lifespan(app: FastAPI):
 
 
 # --------------------------------------------------------------------------- #
-# Live camera rooms
+# Live rooms
 # --------------------------------------------------------------------------- #
 
-class CameraWorker(threading.Thread):
-    """Reads a source, runs the pipeline, and publishes latest frame + state."""
+# How long a browser-pushed room survives with no clients attached. This grace
+# period is not politeness: tearing the room down the instant a tab reloads would
+# throw away the scene baseline and force another 90-frame warm-up before the
+# detector could fire again.
+ROOM_IDLE_GRACE = 60.0
 
-    def __init__(self, room, source):
+
+class RoomBase(threading.Thread):
+    """One live feed: owns a classifier and publishes annotated frames + state.
+
+    Subclasses differ ONLY in where frames come from. process() is the single
+    implementation of the pipeline, so a frame pushed from a browser and a frame
+    pulled from a webcam are scored by identical code -- the same invariant that
+    makes detect.py, analyze.py and evaluate.py share compute_metrics.
+    """
+
+    kind = "base"
+
+    def __init__(self, room):
         super().__init__(daemon=True)
         self.room = room
-        self.source = int(source) if str(source).isdigit() else source
-        self.is_file = not str(source).isdigit()
         self.classifier = PanicClassifier()
         self.lock = threading.Lock()
         self.latest_jpeg = None
-        self.state = {"room": room, "label": "NORMAL", "panic_ratio": 0.0,
-                      "backend": self.classifier.backend,
-                      "degraded": self.classifier.degraded,
-                      "metrics": {}, "online": False}
         self.running = True
+        self.prev_gray = None
+        self.clients = 0
+        self.idle_since = None
+        self.received = 0
+        self.dropped = 0
+        self.fps_in = 0.0
+        self._t_last = None
+        self.state = self._state("NORMAL", {}, online=False)
+
+    # -- state -------------------------------------------------------------- #
+
+    def _state(self, label, metrics, online=True):
+        bl = self.classifier.baseline
+        return {
+            "room": self.room,
+            "kind": self.kind,
+            "label": label,
+            "panic_ratio": round(self.classifier.panic_ratio(), 2),
+            "backend": self.classifier.backend,
+            "degraded": self.classifier.degraded,
+            "score": round(self.classifier.anomaly_score, 2),
+            "threshold": bl.k if bl is not None else None,
+            "warming_up": self.classifier.warming_up,
+            "warmup_have": len(bl.history) if bl is not None else 0,
+            "warmup_total": bl.warmup if bl is not None else 0,
+            "metrics": {k: round(float(v), 3) for k, v in metrics.items()},
+            "clients": self.clients,
+            "received": self.received,
+            "dropped": self.dropped,
+            "fps_in": round(self.fps_in, 1),
+            "online": online,
+        }
 
     def snapshot(self):
+        # Connection counters are facts about right now, not about the last frame
+        # that happened to be processed. Reading them off the frozen state dict
+        # left `clients` stale after a device disconnected, so overlay them live.
         with self.lock:
-            return dict(self.state)
+            s = dict(self.state)
+        s["clients"] = self.clients
+        s["received"] = self.received
+        s["dropped"] = self.dropped
+        s["fps_in"] = round(self.fps_in, 1)
+        if self.kind == "push":
+            s["online"] = self.clients > 0
+        return s
+
+    def reset_baseline(self):
+        """Re-learn what normal looks like for this feed. Needed when the camera
+        was pointed at something busy during warm-up and learned chaos as calm."""
+        with self.lock:
+            self.classifier = PanicClassifier()
+            self.prev_gray = None
+
+    def stop(self):
+        self.running = False
+
+    # -- the pipeline, defined once ----------------------------------------- #
+
+    def process(self, frame):
+        if len(frame.shape) == 2:
+            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        H, W = frame.shape[:2]
+
+        boxes = extract_boxes(_yolo(frame, classes=[0], verbose=False), CONF)
+        small = cv2.resize(frame, (0, 0), fx=FLOW_SCALE, fy=FLOW_SCALE)
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+
+        metrics, flow = {}, None
+        label = self.classifier.state
+        if self.prev_gray is not None:
+            flow = cv2.calcOpticalFlowFarneback(
+                self.prev_gray, gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+            metrics = compute_metrics(flow, boxes, (H, W))
+            label = self.classifier.update(metrics)
+        self.prev_gray = gray
+
+        disp = draw_hud(frame.copy(), boxes, flow, metrics, label,
+                        self.classifier.panic_ratio(), FLOW_SCALE, False)
+        ok, buf = cv2.imencode(".jpg", disp, [cv2.IMWRITE_JPEG_QUALITY, 75])
+
+        now = time.time()
+        if self._t_last is not None:
+            dt = now - self._t_last
+            if dt > 0:
+                inst = 1.0 / dt
+                self.fps_in = inst if not self.fps_in else 0.8 * self.fps_in + 0.2 * inst
+        self._t_last = now
+
+        if ok:
+            with self.lock:
+                self.latest_jpeg = buf.tobytes()
+                self.state = self._state(label, metrics)
+
+
+class PullRoom(RoomBase):
+    """Server-pulled feed: a file path or a webcam index the server opens itself."""
+
+    kind = "pull"
+
+    def __init__(self, room, source):
+        super().__init__(room)
+        self.source = int(source) if str(source).isdigit() else source
+        self.is_file = not str(source).isdigit()
 
     def run(self):
         cap = cv2.VideoCapture(self.source)
-        prev = None
-        metrics, label, flow = {}, "NORMAL", None
         while self.running:
             ret, frame = cap.read()
             if not ret:
-                if self.is_file:                       # loop video files for a live demo
+                if self.is_file:                   # loop video files for a live demo
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    prev = None
+                    self.prev_gray = None
                     continue
                 time.sleep(0.2)
                 continue
-
-            if len(frame.shape) == 2:
-                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-            H, W = frame.shape[:2]
-
-            boxes = extract_boxes(_yolo(frame, classes=[0], verbose=False), CONF)
-            small = cv2.resize(frame, (0, 0), fx=FLOW_SCALE, fy=FLOW_SCALE)
-            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-            if prev is not None:
-                flow = cv2.calcOpticalFlowFarneback(prev, gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
-                metrics = compute_metrics(flow, boxes, (H, W))
-                label = self.classifier.update(metrics)
-            prev = gray
-
-            disp = draw_hud(frame.copy(), boxes, flow, metrics, label,
-                            self.classifier.panic_ratio(), FLOW_SCALE, False)
-            ok, buf = cv2.imencode(".jpg", disp, [cv2.IMWRITE_JPEG_QUALITY, 75])
-            if ok:
-                with self.lock:
-                    self.latest_jpeg = buf.tobytes()
-                    self.state = {
-                        "room": self.room, "label": label,
-                        "panic_ratio": round(self.classifier.panic_ratio(), 2),
-                        "backend": self.classifier.backend,
-                        "degraded": self.classifier.degraded,
-                        "score": round(self.classifier.anomaly_score, 2),
-                        "warming_up": self.classifier.warming_up,
-                        "metrics": {k: round(float(v), 3) for k, v in metrics.items()},
-                        "online": True,
-                    }
+            self.received += 1
+            self.process(frame)
         cap.release()
 
 
+class PushRoom(RoomBase):
+    """Browser-pushed feed. JPEG frames arrive over WS /ingest/{room}."""
+
+    kind = "push"
+
+    def __init__(self, room):
+        super().__init__(room)
+        self.cond = threading.Condition()
+        self.pending = None
+
+    def submit(self, data):
+        """Hand the newest frame to the worker.
+
+        Overwriting `pending` IS the backpressure. The pipeline runs ~15 fps on
+        CPU; if the browser sends faster, queueing would push the annotated view
+        further behind real time every second. Dropping the stale frame instead
+        keeps latency bounded and simply lowers the effective rate.
+        """
+        with self.cond:
+            if self.pending is not None:
+                self.dropped += 1
+            self.pending = data
+            self.received += 1
+            self.cond.notify()
+
+    def stop(self):
+        self.running = False
+        with self.cond:
+            self.cond.notify_all()
+
+    def run(self):
+        while self.running:
+            with self.cond:
+                while self.pending is None and self.running:
+                    self.cond.wait(0.5)
+                data, self.pending = self.pending, None
+            if not data:
+                continue
+            frame = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if frame is not None:
+                self.process(frame)
+
+
 def parse_sources():
-    """Live rooms from PANIC_SOURCES. Empty by default — there is no sensible
+    """Pull rooms from PANIC_SOURCES. Empty by default -- there is no sensible
     default feed, and a room pointing at a file that isn't there just shows up
     as a permanently dead tile."""
     raw = os.environ.get("PANIC_SOURCES", "").strip()
@@ -213,6 +336,29 @@ def parse_sources():
 
 app = FastAPI(title="Crowd Panic Detection", lifespan=lifespan)
 WORKERS = {}
+WORKERS_LOCK = threading.Lock()
+
+
+def get_or_create_push_room(room):
+    with WORKERS_LOCK:
+        r = WORKERS.get(room)
+        if r is None or not r.is_alive():
+            r = PushRoom(room)
+            r.start()
+            WORKERS[room] = r
+        return r
+
+
+def reap_idle_rooms():
+    """Stop push rooms whose last client left more than ROOM_IDLE_GRACE ago."""
+    now = time.time()
+    with WORKERS_LOCK:
+        for name, r in list(WORKERS.items()):
+            if r.kind != "push" or r.clients > 0 or r.idle_since is None:
+                continue
+            if now - r.idle_since > ROOM_IDLE_GRACE:
+                r.stop()
+                WORKERS.pop(name, None)
 
 
 # --------------------------------------------------------------------------- #
@@ -331,37 +477,150 @@ def delete_job(job_id: str):
 
 @app.get("/rooms")
 def rooms():
-    return {"rooms": list(WORKERS), "ffmpeg": ffmpeg_available()}
+    reap_idle_rooms()
+    with WORKERS_LOCK:
+        items = []
+        for name, w in WORKERS.items():
+            snap = w.snapshot()
+            items.append({
+                "name": name,
+                "kind": w.kind,
+                "clients": w.clients,
+                "online": snap.get("online", False),
+            })
+    return {"rooms": items, "ffmpeg": ffmpeg_available()}
 
 
 @app.get("/video/{room}")
 def video(room: str):
-    worker = WORKERS.get(room)
-    if worker is None:
-        return HTMLResponse(f"unknown room {room}", status_code=404)
+    """Annotated MJPEG for a room.
 
-    def gen():
+    The room is re-resolved on every iteration rather than bound once: a push
+    room usually does not exist yet when the page that displays it first asks
+    for the stream, and binding once would 404 forever. Instead we hold the
+    connection open and start emitting as soon as the room appears.
+
+    This generator is ASYNC on purpose. As a sync generator it was iterated via
+    Starlette's threadpool, costing a threadpool round-trip ~25x a second per
+    viewer; with a browser watching a feed while a device pushed to it, that
+    starved the event loop badly enough that the ingest socket missed its
+    keepalive pongs and the server killed the upload mid-stream. Awaiting here
+    keeps everything on the loop.
+
+    It also only emits when the pipeline has actually produced a NEW frame.
+    Re-sending the same JPEG 25x/sec when the pipeline only manages ~15 fps was
+    pure waste on both bandwidth and loop time.
+    """
+    async def gen():
         boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+        waited = 0.0
+        last = None
         while True:
-            frame = worker.latest_jpeg
+            worker = WORKERS.get(room)
+            frame = worker.latest_jpeg if worker is not None else None
             if frame is not None:
-                yield boundary + frame + b"\r\n"
-            time.sleep(0.04)
+                if frame is not last:
+                    yield boundary + frame + b"\r\n"
+                    last = frame
+                waited = 0.0
+            else:
+                waited += 0.03
+                if waited > 30.0:        # room never showed up; let the client go
+                    break
+            await asyncio.sleep(0.03)
 
     return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
 @app.websocket("/ws/{room}")
 async def ws(websocket: WebSocket, room: str):
+    """Live labels + metrics for a dashboard tile.
+
+    Same re-resolution point as /video: the previous version captured the worker
+    once at connect time, so a room created later stayed None forever and the
+    socket silently sent nothing for the life of the connection.
+    """
     await websocket.accept()
-    worker = WORKERS.get(room)
     try:
         while True:
+            worker = WORKERS.get(room)
             if worker is not None:
                 await websocket.send_json(worker.snapshot())
+            else:
+                await websocket.send_json({"room": room, "label": "NORMAL",
+                                           "online": False, "metrics": {}})
             await asyncio.sleep(0.2)
     except WebSocketDisconnect:
         pass
+
+
+@app.websocket("/ingest/{room}")
+async def ingest(websocket: WebSocket, room: str):
+    """Receive camera frames pushed from a browser.
+
+    Two independent tasks run for the life of the connection: one draining
+    incoming JPEG frames into the room, one pushing state back. They are
+    deliberately decoupled -- the sender must keep reporting label and score
+    even if the camera stalls, and that same downstream channel is what device
+    alerts will use once multiple devices can share a room.
+    """
+    await websocket.accept()
+    r = get_or_create_push_room(room)
+    r.clients += 1
+    r.idle_since = None
+    print(f"[server] room '{room}': device connected ({r.clients} total)")
+
+    async def pump_in():
+        while True:
+            msg = await websocket.receive()
+            if msg.get("type") == "websocket.disconnect":
+                return
+            data = msg.get("bytes")
+            if data:
+                r.submit(data)
+
+    async def pump_out():
+        while True:
+            await websocket.send_json(r.snapshot())
+            await asyncio.sleep(0.2)
+
+    tasks = [asyncio.create_task(pump_in()), asyncio.create_task(pump_out())]
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for t in pending:
+            t.cancel()
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
+        for t in tasks:
+            t.cancel()
+        r.clients = max(0, r.clients - 1)
+        if r.clients == 0:
+            r.idle_since = time.time()
+            with r.lock:
+                r.state["online"] = False
+        print(f"[server] room '{room}': device disconnected ({r.clients} left)")
+
+
+@app.post("/api/rooms/{room}/recalibrate")
+def recalibrate(room: str):
+    """Throw away this feed's learned baseline and start learning again.
+
+    scene-baseline assumes the feed starts calm. If warm-up happened while the
+    scene was busy, the detector has learned chaos as normal and will not fire;
+    this is the escape hatch.
+    """
+    worker = WORKERS.get(room)
+    if worker is None:
+        return JSONResponse({"error": f"unknown room {room}"}, status_code=404)
+    worker.reset_baseline()
+    return {"ok": True, "room": room}
+
+
+@app.get("/camera", response_class=HTMLResponse)
+def camera_page():
+    with open(os.path.join(HERE, "camera.html"), encoding="utf-8") as f:
+        return f.read()
 
 
 @app.get("/", response_class=HTMLResponse)

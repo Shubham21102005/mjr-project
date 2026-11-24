@@ -83,7 +83,10 @@
   <span class="dot"></span>
   <h1>Crowd Panic Detection</h1>
   <span class="sub">upload a clip to analyse · live feeds monitored in real time</span>
-  <span class="sub" id="muteWrap" style="margin-left:auto;">
+  <span class="sub" style="margin-left:auto;">
+    <a href="/camera" style="color:var(--accent)">+ stream this device's camera</a>
+  </span>
+  <span class="sub" id="muteWrap">
     <label><input type="checkbox" id="mute"> mute alarm</label>
   </span>
 </header>
@@ -136,8 +139,9 @@
     <h2>Live feeds</h2>
     <div id="grid"></div>
     <div class="empty" id="noRooms" style="display:none">
-      No live feeds configured. Start the server with
-      <code>PANIC_SOURCES="lobby=demo_crowd_30s.avi,webcam=0"</code> to add some.
+      No live feeds yet. <a href="/camera">Stream this device's camera</a> — it appears
+      here automatically. Or start the server with
+      <code>PANIC_SOURCES="lobby=demo_crowd_30s.avi,webcam=0"</code> for server-side sources.
     </div>
   </section>
 </main>
@@ -371,7 +375,7 @@ function tile(room) {
   const el = document.createElement('div');
   el.className = 'cam'; el.id = 'cam-' + room;
   el.innerHTML = `
-    <div class="bar"><span class="name">📷 ${room}</span>
+    <div class="bar"><span class="name">📷 ${room} <span class="tag" id="kind-${room}"></span></span>
       <span class="badge" id="badge-${room}">NORMAL</span></div>
     <img src="/video/${room}" alt="${room} feed">
     <div class="meta">
@@ -387,10 +391,13 @@ function tile(room) {
   return el;
 }
 
+const SOCKETS = {};
+
 function connect(room) {
   // ws:// breaks the moment the page is served over HTTPS — match the protocol.
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${proto}//${location.host}/ws/${room}`);
+  SOCKETS[room] = ws;
   ws.onmessage = (ev) => {
     const s = JSON.parse(ev.data), m = s.metrics || {};
     const panic = s.label === 'PANIC';
@@ -404,20 +411,50 @@ function connect(room) {
     set('occ', (m.crowd_density ?? 0).toFixed(3));
     set('ppl', m.person_count ?? 0);
     set('pr', (s.panic_ratio ?? 0).toFixed(2));
-    set('sc', s.warming_up ? 'learning baseline…' : (s.score ?? 0).toFixed(1));
+    set('sc', s.warming_up
+        ? 'calibrating ' + (s.warmup_have ?? 0) + '/' + (s.warmup_total ?? 0)
+        : (s.score ?? 0).toFixed(1) + (s.threshold != null ? ' / ' + s.threshold.toFixed(1) : ''));
     const be = $('be-' + room);
     be.textContent = s.degraded ? s.backend + ' (model failed to load)' : s.backend;
     be.classList.toggle('bad', !!s.degraded);
     if (panic) beep();
   };
-  ws.onclose = () => setTimeout(() => connect(room), 1500);
+  ws.onclose = () => {
+    // Don't reconnect a room we deliberately removed, or we'd resurrect its tile.
+    if (ws.manualClose) return;
+    setTimeout(() => { if (document.getElementById('cam-' + room)) connect(room); }, 1500);
+  };
 }
 
-fetch('/rooms').then(r => r.json()).then(d => {
-  const grid = $('grid');
-  if (!d.rooms.length) { $('noRooms').style.display = 'block'; return; }
-  d.rooms.forEach(room => { grid.appendChild(tile(room)); connect(room); });
-});
+// Rooms are no longer fixed at startup — a browser camera can create one at any
+// moment — so poll and reconcile instead of reading the list once on load.
+function syncRooms() {
+  fetch('/rooms').then(r => r.json()).then(d => {
+    const grid = $('grid');
+    const rooms = d.rooms || [];
+    const names = rooms.map(r => r.name);
+    $('noRooms').style.display = names.length ? 'none' : 'block';
+
+    rooms.forEach(r => {
+      if (!$('cam-' + r.name)) { grid.appendChild(tile(r.name)); connect(r.name); }
+      const kd = $('kind-' + r.name);
+      if (kd) kd.textContent = r.kind === 'push'
+        ? (r.clients ? r.clients + ' device' + (r.clients > 1 ? 's' : '') : 'idle')
+        : 'server source';
+    });
+
+    Array.from(grid.children).forEach(el => {
+      const n = el.id.replace(/^cam-/, '');
+      if (!names.includes(n)) {
+        const ws = SOCKETS[n];
+        if (ws) { ws.manualClose = true; try { ws.close(); } catch (e) {} delete SOCKETS[n]; }
+        el.remove();
+      }
+    });
+  }).catch(() => {});
+}
+syncRooms();
+setInterval(syncRooms, 3000);
 </script>
 </body>
 </html>
