@@ -454,6 +454,11 @@ def camera_page():
     return _page("camera.html")
 
 
+@app.get("/ui.css")
+def ui_styles():
+    return FileResponse(os.path.join(HERE, "ui.css"), media_type="text/css")
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     return _page("dashboard.html")
