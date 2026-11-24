@@ -1,9 +1,16 @@
 # Crowd Panic Detection System
 
 Detect when a crowd shifts from normal movement into **panic** from any video
-feed — an uploaded clip, a webcam, or a video file — and raise an alert in real
-time. Ships as a standalone CLI viewer and a web dashboard that both analyses
-uploaded clips and monitors live feeds.
+feed (an uploaded clip, a webcam, a video file, or **phone cameras**) and raise
+an alert in real time. Ships as a standalone CLI viewer and a web dashboard that
+analyses uploaded clips and monitors live **multi-camera rooms**.
+
+Highlights:
+
+- **Upload a clip** and get an annotated video plus a timeline of every panic episode.
+- **Turn any phone into a camera** by scanning a QR code: no app to install.
+- **Group cameras into rooms.** The room alarms when any camera in it detects panic, on the dashboard and on every phone in the room.
+- **Scene-relative detection.** Each camera learns what calm looks like for its own view, so one setting works across cameras at different distances.
 
 ![status](https://img.shields.io/badge/status-demo-blue) ![python](https://img.shields.io/badge/python-3.11%2B-informational)
 
@@ -64,6 +71,12 @@ unreliable across machines. Install ffmpeg and make sure it's on `PATH`
 
 YOLOv8 weights (`yolov8n.pt`) are included in the repo.
 
+**For phone cameras, you also need a tunnel** that gives the server an HTTPS
+address, because phone browsers only allow camera access over HTTPS. Either
+[ngrok](https://ngrok.com/download) or
+[cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
+works. Neither is needed for uploads, the CLI, or server-opened sources.
+
 Throughout the rest of this README, `PY` means `venv\Scripts\python` on Windows
 and `venv/bin/python` on macOS/Linux.
 
@@ -76,7 +89,8 @@ venv\Scripts\python -m uvicorn server:app --host 127.0.0.1 --port 8000
 venv/bin/python -m uvicorn server:app --host 127.0.0.1 --port 8000
 ```
 
-Then open <http://localhost:8000>.
+Then open [http://localhost:8000](http://localhost:8000).
+The page has two sections: **Analyse a video clip** (upload) and **Live cameras** (rooms, phones and server-opened sources).
 
 ### Analyse an uploaded clip — the main demo path
 
@@ -100,36 +114,110 @@ is analysed at a time.
 
 Accepts `.mp4 .avi .mov .mkv .webm .m4v .mpg .mpeg`, up to 512 MB.
 
-### Monitor live feeds
+### Monitor live cameras (multi-camera rooms, phones)
 
-Live rooms are opt-in — set `PANIC_SOURCES` (comma-separated `name=source`,
-where a source is a webcam index or a file path the server can open):
+A **room** is a named group of **cameras**.
+The room raises an alarm when any of its cameras is in PANIC, and every camera keeps its own scene baseline.
+Cameras come from two places:
+
+- **Phones (pushed).** A phone opens the `/camera` page, picks a room and a camera name, and streams its camera into the server.
+  Rooms are created the first time a phone joins one.
+- **Sources the server opens (pulled).** Webcams, files or stream URLs listed in `PANIC_SOURCES` at startup.
+
+For how it works inside (architecture, protocols, security, tuning and troubleshooting), see **[docs/multi-camera.md](docs/multi-camera.md)**.
+
+#### Connect a phone
+
+Phone browsers only allow camera access over **HTTPS**, so the server needs an HTTPS address.
+A tunnel provides one.
+
+1. Start the server:
+   ```bash
+   # Windows (PowerShell)
+   $env:PANIC_TOKEN="pick-a-secret"; venv\Scripts\python -m uvicorn server:app --host 127.0.0.1 --port 8000
+   # macOS / Linux
+   PANIC_TOKEN="pick-a-secret" venv/bin/python -m uvicorn server:app --host 127.0.0.1 --port 8000
+   ```
+2. In a second terminal, start a tunnel to port 8000:
+   ```bash
+   ngrok http 8000
+   # or, with no account and no data cap:
+   cloudflared tunnel --url http://localhost:8000
+   ```
+3. Open http://localhost:8000 on the computer and expand **+ Add a phone camera**.
+   With ngrok, the https address fills in automatically.
+   With cloudflared, paste the `https://….trycloudflare.com` address it printed.
+4. Enter a room and a camera name, then click **Show QR code**.
+5. Scan the QR code with the phone, open the link, tap **Start** and allow camera access.
+   If ngrok shows a "You are about to visit" warning page first, tap **Visit Site**.
+6. Prop the phone up so it stays still.
+   It appears on the dashboard within a second, learns what calm looks like for about 9 seconds, then starts monitoring.
+
+Repeat steps 4 and 5 for each extra phone: same room name to group cameras, different camera names.
+When any camera in a room goes into PANIC, its tile and the room flash red on the dashboard, the dashboard beeps, and every phone in that room flashes, vibrates and beeps.
+
+**Access token.**
+Anything that reaches the server through the tunnel, or from another device, needs the access token.
+The QR link carries it and the phone keeps it in a cookie after the first visit.
+Set `PANIC_TOKEN` to keep the same token across restarts.
+Without it, a random token is printed at startup and old QR links stop working after a restart.
+The dashboard opened directly on the computer (`localhost`) needs no token.
+
+**Bandwidth.**
+A phone sends about 10 frames per second at 640 px, roughly 200-400 KB/s, which is around 0.7-1.4 GB per hour.
+The ngrok free plan has a monthly data allowance, so for long sessions prefer cloudflared.
+
+If something doesn't work, the [troubleshooting table](docs/multi-camera.md#troubleshooting) covers the common cases.
+
+#### Server-opened sources
+
+`PANIC_SOURCES` is a comma-separated list of `room=source` or `room/camera=source` entries.
+A source is a webcam index, a file path (looped and played at its own frame rate) or a stream URL OpenCV can open.
 
 ```bash
 # Windows (PowerShell)
-$env:PANIC_SOURCES="lobby=demo_crowd_30s.avi,webcam=0"; venv\Scripts\python -m uvicorn server:app --port 8000
+$env:PANIC_SOURCES="lobby=demo_crowd_30s.avi,lobby/webcam=0"; venv\Scripts\python -m uvicorn server:app --port 8000
 # macOS / Linux
-PANIC_SOURCES="lobby=demo_crowd_30s.avi,webcam=0" venv/bin/python -m uvicorn server:app --port 8000
+PANIC_SOURCES="lobby=demo_crowd_30s.avi,lobby/webcam=0" venv/bin/python -m uvicorn server:app --port 8000
 ```
 
-Each room gets a tile in the grid streaming its annotated feed as MJPEG, with
-labels and metrics arriving over a WebSocket. A tile turns red and sounds an
-alarm while its feed is in PANIC.
+A bare `room=source` becomes the camera `main` in that room.
 
-Note these rooms are **server-pulled** sources fixed at startup — a phone cannot
-join a room by ID and push its camera in. See "Not built yet" below.
+#### Simulate phones without a phone
+
+`fake_phone.py` streams a video file into a room through exactly the same WebSocket and protocol the phone page uses.
+Use it to try multi-camera rooms, to load-test, or to demo an alarm on the live path:
+
+```bash
+PY fake_phone.py --source panic_test.avi --room lobby --cam sim1 --every-frame
+PY fake_phone.py --source demo_crowd_30s.avi --room lobby --cam sim2 --loop
+# through a tunnel:
+PY fake_phone.py --url wss://xxxx.ngrok-free.app --token pick-a-secret --source panic_test.avi --every-frame
+```
+
+#### Live tuning
+
+| Env var            | Default | Meaning                                                    |
+| ------------------ | ------- | ---------------------------------------------------------- |
+| `PANIC_TOKEN`      | random  | Access token for tunnel / other-device access              |
+| `PANIC_PUBLIC_URL` | (auto)  | The https address phones should use (else asks ngrok)      |
+| `PANIC_LIVE_FPS`   | `10`    | Per-camera analysis rate (optical flow + classifier)       |
+| `PANIC_DETECT_FPS` | `3`     | Per-camera person-detection rate (YOLO, batched)           |
 
 ### HTTP API
 
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/api/upload` | Upload a clip; returns a `job_id` |
-| `GET` | `/api/jobs/{id}` | Job status, progress, and the full result |
-| `GET` | `/api/jobs/{id}/video` | The annotated MP4 (supports Range requests) |
-| `DELETE` | `/api/jobs/{id}` | Drop a job and its files |
-| `GET` | `/rooms` | Configured live rooms |
-| `GET` | `/video/{room}` | MJPEG stream for a live room |
-| `WS` | `/ws/{room}` | Live labels + metrics |
+| Method     | Path                     | Purpose                                     |
+| ---------- | ------------------------ | ------------------------------------------- |
+| `POST`   | `/api/upload`          | Upload a clip; returns a `job_id`         |
+| `GET`    | `/api/jobs/{id}`       | Job status, progress, and the full result   |
+| `GET`    | `/api/jobs/{id}/video` | The annotated MP4 (supports Range requests) |
+| `DELETE` | `/api/jobs/{id}`       | Drop a job and its files                    |
+| `GET`    | `/api/rooms`           | All rooms and cameras with live state       |
+| `GET`    | `/api/join?room=&cam=` | Join link + QR code (SVG) for a phone       |
+| `GET`    | `/camera`              | The phone camera page                       |
+| `WS`     | `/ws/ingest/{room}/{cam}` | A device pushes JPEG frames in; JSON acks |
+| `WS`     | `/ws/live`             | Dashboard feed: state + annotated frames    |
+| `GET`    | `/video/{room}/{cam}`  | MJPEG stream of one camera                  |
 
 ## CLI viewer
 
@@ -171,17 +259,31 @@ PY evaluate.py --dataset datasets/UCSD_Anomaly_Dataset.v1p2/UCSDped1/Test
 
 Reports precision / recall / F1 / accuracy against frame-level ground truth.
 
+## Tests
+
+```bash
+PY -m pip install -r requirements-dev.txt
+PY -m pytest
+```
+
+`test_live.py` covers the multi-camera core with a stub detector and runs in seconds.
+`test_server.py` runs the real app in-process with real YOLO and pushes real frames through the phone ingest path.
+To try the live path by hand without a phone, use `fake_phone.py` (see above) or Chrome's fake camera, described in [docs/multi-camera.md](docs/multi-camera.md#testing).
+
 ## Project layout
 
-| Area | Files |
-|---|---|
-| Core pipeline | `metrics.py`, `classifier.py`, `baseline.py` |
-| CLI viewer | `detect.py` (owns `extract_boxes` + `draw_hud`, reused everywhere) |
-| Web app | `server.py` (FastAPI), `dashboard.html` |
-| Clip analysis | `analyze.py`, `video_writer.py` (ffmpeg/libx264 encoding) |
-| Training | `train_classifier.py`, `synth.py` (synthetic clip generator) |
-| Evaluation | `evaluate.py`, `visualize.py`, `umn_labels.py` (UMN ground truth) |
-| Test assets | `make_test_video.py`, demo videos, `yolov8n.pt` |
+| Area          | Files                                                                    |
+| ------------- | ------------------------------------------------------------------------ |
+| Core pipeline | `metrics.py`, `classifier.py`, `baseline.py`                       |
+| CLI viewer    | `detect.py` (owns `extract_boxes` + `draw_hud`, reused everywhere) |
+| Web app       | `server.py` (FastAPI), `dashboard.html`, `auth.py` (access token)    |
+| Live cameras  | `live.py` (rooms, sources, analysis + detection threads), `camera.html` (phone page), `fake_phone.py` |
+| Docs          | `docs/multi-camera.md` (live cameras in depth)                        |
+| Tests         | `test_live.py`, `test_server.py` (`PY -m pytest`, after `pip install -r requirements-dev.txt`) |
+| Clip analysis | `analyze.py`, `video_writer.py` (ffmpeg/libx264 encoding)            |
+| Training      | `train_classifier.py`, `synth.py` (synthetic clip generator)         |
+| Evaluation    | `evaluate.py`, `visualize.py`, `umn_labels.py` (UMN ground truth)  |
+| Test assets   | `make_test_video.py`, demo videos, `yolov8n.pt`                      |
 
 ## Limitations
 
@@ -190,11 +292,11 @@ Reports precision / recall / F1 / accuracy against frame-level ground truth.
   `umn_labels.py` from the video's own burned-in banner), scoring each scene
   independently:
 
-  | scene | old `trained-model` F1 | `scene-baseline` F1 | Recall |
-  |---|---|---|---|
-  | 1 | 0.000 | 0.845 | 0.925 |
-  | 2 | 0.000 | 0.591 | 0.545 |
-  | 3 *(held out from all tuning)* | 0.000 | 0.610 | **1.000** |
+  | scene                            | old `trained-model` F1 | `scene-baseline` F1 | Recall          |
+  | -------------------------------- | ------------------------ | --------------------- | --------------- |
+  | 1                                | 0.000                    | 0.845                 | 0.925           |
+  | 2                                | 0.000                    | 0.591                 | 0.545           |
+  | 3 *(held out from all tuning)* | 0.000                    | 0.610                 | **1.000** |
 
   On the held-out scene it raises exactly 3 alarms for the 3 real escapes.
   Parameters were tuned on scenes 1 and 2 only.
@@ -210,16 +312,22 @@ Reports precision / recall / F1 / accuracy against frame-level ground truth.
 - **UCSD is a mismatched benchmark** — its anomalies are non-pedestrian objects
   (bikes, carts), not crowd panic; `evaluate.py` uses it for a reproducible
   baseline only.
-- **Multi-camera throughput.** One stream runs ~15 fps on CPU and rooms share one
-  YOLO model with no frame-skipping, so N rooms split that budget.
+- **Multi-camera throughput.** Analysis (optical flow + classifier) and person
+  detection (YOLO) run on separate threads. Analysis holds each camera at a
+  steady `PANIC_LIVE_FPS`; detection is batched across cameras at
+  `PANIC_DETECT_FPS`. On a 2-core laptop, three cameras held ~10 fps each. Past
+  the CPU budget, every camera slows down evenly.
+- **Phones must stay still.** A handheld phone's own shake produces motion
+  everywhere in the frame, which reads exactly like panic. Mount or prop it.
+  Switching lenses (Flip) or rotating the phone restarts that camera's warm-up.
 
 ## Not built yet
 
-- **Devices joining a room by ID.** Rooms are server-pulled sources configured at
-  startup; there is no ingest endpoint and the page never captures a camera, so a
-  phone can't push a feed into a shared room.
-- **Alert delivery.** The alarm is a beep in whichever browser has the dashboard
-  open. Nothing is pushed to the camera device or anywhere else.
+- **Alert delivery beyond open pages.** The alarm reaches the dashboard and every
+  phone in the room, but only while those pages are open. Nothing is sent by
+  push notification, SMS or email.
+- **Camera-shake compensation.** Subtracting the global (median) flow before
+  computing metrics would tolerate handheld phones; not done yet.
 
 ## License
 
