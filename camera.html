@@ -3,81 +3,44 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Crowd Panic Detection — Live Camera</title>
-<style>
-  :root { --bg:#0e1117; --panel:#161b22; --line:#232a34; --txt:#e6edf3; --muted:#8b949e;
-          --ok:#2ea043; --panic:#f85149; --accent:#388bfd; --warn:#d29922; }
-  * { box-sizing:border-box; }
-  body { margin:0; font-family:-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--txt); }
-  body.panic { background:#2b0606; }
-  header { padding:16px 22px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
-  header h1 { font-size:18px; margin:0; font-weight:600; }
-  header .dot { width:9px; height:9px; border-radius:50%; background:var(--muted); }
-  header .dot.live { background:var(--ok); box-shadow:0 0 8px var(--ok); }
-  header .sub { color:var(--muted); font-size:13px; }
-  main { padding:22px; max-width:1200px; margin:0 auto; }
-  h2 { font-size:15px; font-weight:600; margin:0 0 12px; letter-spacing:.3px; }
-  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; margin-bottom:20px; }
-  .card.panic { border-color:var(--panic); box-shadow:0 0 0 2px var(--panic), 0 0 30px rgba(248,81,73,.45); animation:pulse 1s infinite; }
-  @keyframes pulse { 50% { box-shadow:0 0 0 2px var(--panic), 0 0 10px rgba(248,81,73,.25); } }
-
-  label.f { display:block; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:5px; }
-  input, select { background:#0b0e13; border:1px solid var(--line); color:var(--txt);
-                  border-radius:7px; padding:8px 10px; font-size:13.5px; font-family:inherit; }
-  .controls { display:flex; gap:14px; flex-wrap:wrap; align-items:flex-end; }
-  .btn { background:var(--accent); color:#fff; border:0; border-radius:7px; padding:10px 20px;
-         font-size:13.5px; font-weight:600; cursor:pointer; font-family:inherit; }
-  .btn:disabled { opacity:.45; cursor:not-allowed; }
-  .btn.stop { background:var(--panic); }
-  .btn.ghost { background:transparent; border:1px solid var(--line); color:var(--txt); }
-
-  .views { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:18px; }
-  .view { background:#0b0e13; border:1px solid var(--line); border-radius:10px; overflow:hidden; }
-  .view .cap { padding:9px 13px; font-size:12px; color:var(--muted); border-bottom:1px solid var(--line);
-               display:flex; justify-content:space-between; align-items:center; }
-  .view video, .view img { width:100%; display:block; background:#000; aspect-ratio:4/3; object-fit:contain; }
-
-  .badge { font-size:13px; font-weight:700; padding:5px 13px; border-radius:20px;
-           background:var(--ok); color:#04210d; letter-spacing:.5px; }
-  .badge.panic { background:var(--panic); color:#2b0606; }
-  .badge.warm { background:var(--warn); color:#2b1f04; }
-
-  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:11px; margin-top:16px; }
-  .stat { background:#0b0e13; border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
-  .stat .k { font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
-  .stat .v { font-size:15px; font-weight:600; margin-top:3px; font-variant-numeric:tabular-nums; }
-
-  .bar { height:6px; background:#0b0e13; border-radius:99px; overflow:hidden; margin-top:9px; }
-  .bar i { display:block; height:100%; width:0%; background:var(--warn); transition:width .2s; }
-  .note { font-size:12.5px; color:var(--muted); margin-top:12px; line-height:1.55; }
-  .err { color:var(--panic); font-size:13px; margin-top:12px; line-height:1.5; }
-  .warnbox { background:rgba(210,153,34,.1); border:1px solid rgba(210,153,34,.4); color:#e3b341;
-             border-radius:8px; padding:12px 14px; font-size:13px; margin-bottom:18px; line-height:1.55; }
-  a { color:var(--accent); }
-  code { background:#0b0e13; padding:1px 5px; border-radius:4px; font-size:12px; }
-</style>
+<title>Crowd Detection — Device Camera</title>
+<link rel="stylesheet" href="/ui.css">
 </head>
 <body>
-<header>
-  <span class="dot" id="dot"></span>
-  <h1>Live Camera</h1>
-  <span class="sub">your camera streams to the detector · panic is flagged in real time</span>
-  <span class="sub" style="margin-left:auto"><a href="/">← dashboard</a></span>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="/" aria-label="Crowd Detection home">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+      <span class="brand-name">Crowd Detection<small>Analysis console</small></span>
+    </a>
+    <nav class="topnav" aria-label="Main navigation">
+      <a href="/">Overview</a>
+      <a href="/camera" aria-current="page">Device camera</a>
+    </nav>
+    <div class="topbar-end"><span class="system-label" id="connectionStatus">Camera offline</span></div>
+  </div>
 </header>
 
-<main>
-  <div class="warnbox" id="insecure" style="display:none"></div>
+<main class="page">
+  <div class="page-head">
+    <div><p class="eyebrow">Video monitoring / Device camera</p><h1>Bring a camera online.</h1><p class="lede">Send this device’s video to the detector and follow the annotated feed as it learns the scene.</p></div>
+    <div class="page-aside"><span class="rule" aria-hidden="true"></span><span><strong>Private by default</strong><br>Video is sent to this server only.</span></div>
+  </div>
 
-  <section class="card">
-    <h2>Source</h2>
+  <div class="warnbox" id="insecure" role="alert" style="display:none"></div>
+  <div class="camera-layout">
+
+  <section class="panel" aria-labelledby="source-title">
+    <div class="panel-head"><div><span class="section-index">01 / SOURCE SETUP</span><h2 id="source-title">Camera settings</h2><p class="section-note">Choose the source and stream quality.</p></div></div>
+    <div class="panel-body">
     <div class="controls">
-      <div>
-        <label class="f" for="room">Room</label>
-        <input id="room" value="mycam" size="14">
+      <div class="full">
+        <label class="f" for="room">Feed name</label>
+        <input id="room" value="mycam" autocomplete="off" spellcheck="false">
       </div>
-      <div>
+      <div class="full">
         <label class="f" for="cam">Camera</label>
-        <select id="cam"><option value="">default</option></select>
+        <select id="cam"><option value="">Default camera</option></select>
       </div>
       <div>
         <label class="f" for="fps">Send rate</label>
@@ -96,47 +59,47 @@
           <option value="960x720">960 × 720</option>
         </select>
       </div>
-      <button class="btn" id="go">Start camera</button>
-      <button class="btn stop" id="stop" style="display:none">Stop</button>
-      <button class="btn ghost" id="recal" disabled title="Forget the learned baseline and start learning again">Recalibrate</button>
     </div>
-    <div class="err" id="err" style="display:none"></div>
-    <div class="note">
-      The detector learns what <em>normal</em> looks like for this camera before it can
-      flag anything — hold still for the first few seconds. Then move fast and erratically
-      to trip it.
+    <div class="camera-actions"><button class="btn" id="go">Start camera <span aria-hidden="true">↗</span></button><button class="btn stop" id="stop" style="display:none">Stop camera</button><button class="btn ghost" id="recal" disabled title="Forget the learned baseline and start learning again">Recalibrate baseline</button></div>
+    <div class="err" id="err" role="alert" style="display:none"></div>
+    <div class="note"><strong>Before you begin</strong>The detector first learns ordinary movement in this view. Keep the camera steady during calibration, then monitor the status on the right.</div>
     </div>
   </section>
 
-  <section class="card" id="livecard" style="display:none">
-    <h2 style="display:flex;justify-content:space-between;align-items:center">
-      <span>Live</span><span class="badge" id="badge">NORMAL</span>
-    </h2>
+  <div class="panel" id="cameraEmpty">
+    <div class="panel-head"><div><span class="section-index">02 / LIVE VIEW</span><h2>Monitor</h2><p class="section-note">Your stream will appear here.</p></div></div>
+    <div class="feed-stage camera-empty"><span class="stage-icon" aria-hidden="true"></span><strong>Camera is offline</strong><p>Choose a source and start the camera to see the original and annotated views side by side.</p></div>
+  </div>
+
+  <section class="panel live-panel" id="livecard" aria-labelledby="monitor-title" style="display:none">
+    <div class="panel-head"><div><span class="section-index">02 / LIVE VIEW</span><h2 id="monitor-title">Monitor</h2></div><span class="badge" id="badge" role="status">NORMAL</span></div>
+    <div class="panel-body">
 
     <div class="views">
       <div class="view">
-        <div class="cap"><span>Your camera</span><span id="sentTxt">—</span></div>
+        <div class="cap"><span>Original feed</span><span id="sentTxt">—</span></div>
         <video id="preview" playsinline muted></video>
       </div>
       <div class="view" id="annotWrap">
         <div class="cap">
-          <span>What the model sees</span>
-          <span><label style="cursor:pointer"><input type="checkbox" id="showAnnot" checked> show</label></span>
+          <span>Detection view</span>
+          <label class="checkline"><input type="checkbox" id="showAnnot" checked> Show</label>
         </div>
-        <img id="annot" alt="annotated stream">
+        <img id="annot" alt="Live feed annotated with detected people and movement status">
       </div>
     </div>
 
-    <div id="warmwrap" style="margin-top:16px; display:none">
-      <div style="font-size:12.5px;color:var(--warn)" id="warmtxt">learning what normal looks like…</div>
-      <div class="bar"><i id="warmbar"></i></div>
+    <div class="warmup" id="warmwrap" style="display:none">
+      <div class="warmup-label" id="warmtxt">Learning what normal looks like…</div>
+      <div class="warmup-bar"><i id="warmbar"></i></div>
     </div>
 
     <div class="stats" id="stats"></div>
-    <div class="note" style="margin-top:14px">
-      <label style="cursor:pointer"><input type="checkbox" id="mute"> mute alarm</label>
+    <div class="camera-footer"><label class="checkline"><input type="checkbox" id="mute"> Mute alarm</label><a href="/">View on overview ↗</a></div>
     </div>
   </section>
+  </div>
+  <footer class="page-foot">Crowd Detection · Browser camera access requires localhost or HTTPS.</footer>
 </main>
 
 <canvas id="canvas" style="display:none"></canvas>
@@ -196,7 +159,9 @@ $('go').addEventListener('click', async () => {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(proto + '//' + location.host + '/ingest/' + encodeURIComponent(room));
   ws.onopen = () => {
-    $('dot').classList.add('live');
+    $('connectionStatus').textContent = 'Camera live';
+    $('connectionStatus').classList.remove('offline');
+    $('cameraEmpty').style.display = 'none';
     $('livecard').style.display = 'block';
     $('go').style.display = 'none';
     $('stop').style.display = 'inline-block';
@@ -240,11 +205,13 @@ function stopAll() {
   if (ws) { try { ws.close(); } catch (e) {} ws = null; }
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
   $('annot').removeAttribute('src');
-  $('dot').classList.remove('live');
+  $('connectionStatus').textContent = 'Camera offline';
+  $('connectionStatus').classList.add('offline');
+  $('cameraEmpty').style.display = 'block';
+  $('livecard').style.display = 'none';
   $('go').style.display = 'inline-block';
   $('stop').style.display = 'none';
   $('recal').disabled = true;
-  document.body.classList.remove('panic');
   $('livecard').classList.remove('panic');
 }
 
@@ -276,7 +243,6 @@ function paint(s) {
   const badge = $('badge');
   badge.textContent = s.warming_up ? 'CALIBRATING' : s.label;
   badge.className = 'badge' + (panic ? ' panic' : (s.warming_up ? ' warm' : ''));
-  document.body.classList.toggle('panic', panic);
   $('livecard').classList.toggle('panic', panic);
   if (panic && lastLabel !== 'PANIC') alarm();
   else if (panic) alarm();

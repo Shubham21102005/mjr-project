@@ -3,147 +3,94 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Crowd Panic Detection — Dashboard</title>
-<style>
-  :root { --bg:#0e1117; --panel:#161b22; --line:#232a34; --txt:#e6edf3; --muted:#8b949e;
-          --ok:#2ea043; --panic:#f85149; --accent:#388bfd; --warn:#d29922; }
-  * { box-sizing:border-box; }
-  body { margin:0; font-family:-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--txt); }
-  header { padding:16px 22px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
-  header h1 { font-size:18px; margin:0; font-weight:600; }
-  header .dot { width:9px; height:9px; border-radius:50%; background:var(--ok); box-shadow:0 0 8px var(--ok); }
-  header .sub { color:var(--muted); font-size:13px; }
-  main { padding:22px; max-width:1200px; margin:0 auto; }
-  h2 { font-size:15px; font-weight:600; margin:0 0 12px; letter-spacing:.3px; }
-  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; margin-bottom:22px; }
-
-  /* ---- upload ---- */
-  #drop { border:2px dashed var(--line); border-radius:10px; padding:30px 20px; text-align:center;
-          transition:border-color .15s, background .15s; cursor:pointer; }
-  #drop.over { border-color:var(--accent); background:rgba(56,139,253,.07); }
-  #drop .big { font-size:15px; margin-bottom:6px; }
-  #drop .hint { color:var(--muted); font-size:12.5px; }
-  #file { display:none; }
-  .btn { background:var(--accent); color:#fff; border:0; border-radius:7px; padding:9px 18px;
-         font-size:13.5px; font-weight:600; cursor:pointer; }
-  .btn:disabled { opacity:.45; cursor:not-allowed; }
-  .btn.ghost { background:transparent; border:1px solid var(--line); color:var(--txt); }
-  .rowline { display:flex; align-items:center; gap:12px; margin-top:14px; flex-wrap:wrap; }
-  .fname { font-size:13px; color:var(--muted); }
-
-  .prog { height:8px; background:#0b0e13; border-radius:99px; overflow:hidden; margin-top:14px; }
-  .prog i { display:block; height:100%; width:0%; background:var(--accent); transition:width .25s; }
-  .progtxt { font-size:12.5px; color:var(--muted); margin-top:8px; font-variant-numeric:tabular-nums; }
-  .err { color:var(--panic); font-size:13px; margin-top:12px; }
-  .warnbox { color:var(--warn); font-size:12.5px; margin-top:10px; }
-
-  /* ---- result ---- */
-  .verdict { display:inline-flex; align-items:center; gap:8px; font-size:14px; font-weight:700;
-             padding:7px 14px; border-radius:20px; letter-spacing:.4px; }
-  .verdict.panic { background:var(--panic); color:#2b0606; }
-  .verdict.clear { background:var(--ok); color:#04210d; }
-  video { width:100%; max-height:70vh; object-fit:contain; border-radius:10px;
-          background:#000; display:block; margin-top:14px; }
-
-  .tlwrap { margin-top:16px; }
-  .tllabel { display:flex; justify-content:space-between; font-size:12px; color:var(--muted); margin-bottom:6px; }
-  #timeline { width:100%; height:72px; display:block; border-radius:8px; background:#0b0e13; cursor:pointer; }
-
-  .segs { margin-top:16px; display:flex; flex-wrap:wrap; gap:8px; }
-  .seg { background:rgba(248,81,73,.12); border:1px solid rgba(248,81,73,.45); color:#ffb4b0;
-         border-radius:7px; padding:7px 12px; font-size:12.5px; cursor:pointer; font-variant-numeric:tabular-nums; }
-  .seg:hover { background:rgba(248,81,73,.22); }
-  .noseg { color:var(--muted); font-size:13px; margin-top:14px; }
-
-  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:12px; margin-top:18px; }
-  .stat { background:#0b0e13; border:1px solid var(--line); border-radius:8px; padding:11px 13px; }
-  .stat .k { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
-  .stat .v { font-size:16px; font-weight:600; margin-top:3px; font-variant-numeric:tabular-nums; }
-
-  /* ---- live ---- */
-  #grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(360px,1fr)); gap:18px; }
-  .cam { background:#0b0e13; border:1px solid var(--line); border-radius:12px; overflow:hidden; transition:box-shadow .2s,border-color .2s; }
-  .cam.panic { border-color:var(--panic); box-shadow:0 0 0 2px var(--panic), 0 0 24px rgba(248,81,73,.5); animation:pulse 1s infinite; }
-  @keyframes pulse { 50% { box-shadow:0 0 0 2px var(--panic), 0 0 8px rgba(248,81,73,.3); } }
-  .cam .bar { display:flex; align-items:center; justify-content:space-between; padding:10px 14px; border-bottom:1px solid var(--line); }
-  .cam .name { font-weight:600; }
-  .badge { font-size:12px; font-weight:700; padding:4px 10px; border-radius:20px; background:var(--ok); color:#04210d; letter-spacing:.5px; }
-  .badge.panic { background:var(--panic); color:#2b0606; }
-  .cam img { width:100%; display:block; background:#000; aspect-ratio:16/10; object-fit:contain; }
-  .meta { padding:12px 14px; }
-  .row { display:flex; justify-content:space-between; font-size:13px; padding:3px 0; color:var(--muted); }
-  .row b { color:var(--txt); font-variant-numeric:tabular-nums; font-weight:500; }
-  .tag { font-size:11px; color:var(--muted); }
-  .tag.bad { color:var(--panic); }
-  .empty { color:var(--muted); font-size:13px; }
-</style>
+<title>Crowd Detection — Overview</title>
+<link rel="stylesheet" href="/ui.css">
 </head>
 <body>
-<header>
-  <span class="dot"></span>
-  <h1>Crowd Panic Detection</h1>
-  <span class="sub">upload a clip to analyse · live feeds monitored in real time</span>
-  <span class="sub" style="margin-left:auto;">
-    <a href="/camera" style="color:var(--accent)">+ stream this device's camera</a>
-  </span>
-  <span class="sub" id="muteWrap">
-    <label><input type="checkbox" id="mute"> mute alarm</label>
-  </span>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="/" aria-label="Crowd Detection home">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+      <span class="brand-name">Crowd Detection<small>Analysis console</small></span>
+    </a>
+    <nav class="topnav" aria-label="Main navigation">
+      <a href="/" aria-current="page">Overview</a>
+      <a href="/camera">Device camera</a>
+    </nav>
+    <div class="topbar-end">
+      <span class="system-label">Local workspace</span>
+      <label class="checkline"><input type="checkbox" id="mute"> Mute alarm</label>
+    </div>
+  </div>
 </header>
 
-<main>
-  <section class="card">
-    <h2>Analyse a video clip</h2>
-    <div id="drop">
-      <div class="big">Drop a video here, or <span style="color:var(--accent)">browse</span></div>
-      <div class="hint">mp4 · avi · mov · mkv · webm — up to 512 MB. The detector runs over every frame and marks where the crowd panics.</div>
-      <input type="file" id="file" accept="video/*,.avi,.mkv,.mov,.mp4,.webm,.m4v,.mpg,.mpeg">
+<main class="page">
+  <div class="page-head">
+    <div>
+      <p class="eyebrow">Video monitoring / Overview</p>
+      <h1>See the moment movement changes.</h1>
+      <p class="lede">Analyse recorded footage frame by frame, or watch a connected camera in real time. Review every alert against the video that produced it.</p>
     </div>
+    <div class="page-aside"><span class="rule" aria-hidden="true"></span><span><strong>Scene-relative detection</strong><br>Each feed learns its own baseline.</span></div>
+  </div>
+
+  <div class="workspace">
+  <section class="panel" aria-labelledby="upload-title">
+    <div class="panel-head"><div><span class="section-index">01 / REVIEW FOOTAGE</span><h2 id="upload-title">Analyse a clip</h2><p class="section-note">Find changes in crowd behaviour across a recording.</p></div></div>
+    <div class="panel-body">
+    <label id="drop" for="file">
+      <span class="upload-glyph" aria-hidden="true"></span>
+      <span class="big">Drop a video here <span class="browse">or browse files</span></span>
+      <span class="hint">MP4, AVI, MOV, MKV and WebM · up to 512 MB. Your clip is processed locally by this server.</span>
+      <input type="file" id="file" accept="video/*,.avi,.mkv,.mov,.mp4,.webm,.m4v,.mpg,.mpeg">
+    </label>
     <div class="rowline">
-      <button class="btn" id="go" disabled>Analyse</button>
-      <span class="fname" id="fname">no file selected</span>
+      <button class="btn" id="go" disabled>Start analysis <span aria-hidden="true">↗</span></button>
+      <span class="fname" id="fname" aria-live="polite">No file selected</span>
     </div>
     <div id="progwrap" style="display:none">
       <div class="prog"><i id="bar"></i></div>
-      <div class="progtxt" id="progtxt">…</div>
+      <div class="progtxt" id="progtxt" role="status">…</div>
     </div>
-    <div class="err" id="err" style="display:none"></div>
+    <div class="err" id="err" role="alert" style="display:none"></div>
+    <div class="support-line"><strong>What you get</strong><span>An annotated video, event timeline and a summary of detected episodes.</span></div>
+    </div>
   </section>
 
-  <section class="card" id="result" style="display:none">
-    <h2>Result</h2>
-    <span class="verdict" id="verdict">—</span>
-    <div class="warnbox" id="reswarn" style="display:none"></div>
-    <video id="player" controls preload="metadata" playsinline></video>
+  <section class="panel" aria-labelledby="live-title">
+    <div class="panel-head"><div><span class="section-index">02 / MONITOR LIVE</span><h2 id="live-title">Live feeds</h2><p class="section-note">Camera sources appear here as they connect.</p></div><a class="head-action" href="/camera">Connect camera ↗</a></div>
+    <div id="grid"></div>
+    <div id="noRooms" style="display:none">
+      <div class="feed-stage"><span class="stage-icon" aria-hidden="true"></span><strong>No active feeds</strong><p>Connect this device’s camera to start monitoring. Its live view and detection status will appear here.</p><a href="/camera">Set up device camera →</a></div>
+      <div class="feed-footer"><span><b>Other sources</b> can be configured at server startup.</span><code>PANIC_SOURCES</code></div>
+    </div>
+  </section>
+  </div>
+
+  <section class="panel wide-panel" id="result" aria-labelledby="result-title" style="display:none">
+    <div class="panel-head"><div><span class="section-index">ANALYSIS / COMPLETE</span><div class="result-headline"><h2 id="result-title">Clip results</h2><span class="verdict" id="verdict">—</span></div></div><a class="btn ghost" id="dl" download>Download annotated clip</a></div>
+    <div class="panel-body">
+    <div class="warnbox" id="reswarn" role="status" style="display:none"></div>
+    <video class="result-video" id="player" controls preload="metadata" playsinline></video>
 
     <div class="tlwrap">
       <div class="tllabel">
-        <span>Panic timeline — blue is the anomaly score, dashed red its threshold, red bands are PANIC, grey is baseline warm-up. Click to jump.</span>
+        <strong>Event timeline · click to jump</strong>
         <span id="tlend">—</span>
       </div>
-      <canvas id="timeline"></canvas>
+      <canvas id="timeline" tabindex="0" role="slider" aria-label="Event timeline, use left and right arrows to seek" aria-valuemin="0" aria-valuenow="0" aria-valuemax="0"></canvas>
+      <div class="legend"><span><i></i>Anomaly score</span><span><i class="threshold"></i>Threshold</span><span><i class="episode"></i>Detected episode</span><span><i class="warmup"></i>Calibration</span></div>
     </div>
 
     <div id="segs" class="segs"></div>
     <div id="noseg" class="noseg" style="display:none">
-      No panic detected anywhere in this clip — the crowd stayed within normal movement for the whole duration.
+      No panic episodes were detected in this clip.
     </div>
 
     <div class="stats" id="stats"></div>
-    <div class="rowline">
-      <a class="btn ghost" id="dl" download>Download annotated clip</a>
     </div>
   </section>
-
-  <section class="card">
-    <h2>Live feeds</h2>
-    <div id="grid"></div>
-    <div class="empty" id="noRooms" style="display:none">
-      No live feeds yet. <a href="/camera">Stream this device's camera</a> — it appears
-      here automatically. Or start the server with
-      <code>PANIC_SOURCES="lobby=demo_crowd_30s.avi,webcam=0"</code> for server-side sources.
-    </div>
-  </section>
+  <footer class="page-foot">Crowd Detection · Alerts are decision support. Review the footage before acting on an event.</footer>
 </main>
 
 <script>
@@ -152,7 +99,6 @@ const $ = id => document.getElementById(id);
 const drop = $('drop'), fileInput = $('file'), go = $('go');
 let chosen = null, poll = null;
 
-drop.addEventListener('click', () => fileInput.click());
 drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
 drop.addEventListener('dragleave', () => drop.classList.remove('over'));
 drop.addEventListener('drop', e => {
@@ -256,13 +202,15 @@ function render(jobId, r) {
   player.load();
   $('dl').href = '/api/jobs/' + jobId + '/video';
   $('tlend').textContent = fmt(r.duration);
+  cv.setAttribute('aria-valuemax', Math.round(r.duration));
 
   // segments
   const segs = $('segs');
   segs.innerHTML = '';
   $('noseg').style.display = r.segments.length ? 'none' : 'block';
   r.segments.forEach((s, i) => {
-    const el = document.createElement('div');
+    const el = document.createElement('button');
+    el.type = 'button';
     el.className = 'seg';
     el.textContent = '⚠ PANIC #' + (i + 1) + '   ' + fmt(s.start) + ' → ' + fmt(s.end) + '   (' + s.duration + 's)';
     el.onclick = () => { player.currentTime = s.start; player.play(); };
@@ -300,7 +248,7 @@ function drawTimeline() {
   const x = t => (t / dur) * W;
 
   // panic bands
-  g.fillStyle = 'rgba(248,81,73,.30)';
+  g.fillStyle = 'rgba(171,62,48,.26)';
   r.segments.forEach(s => g.fillRect(x(s.start), 0, Math.max(2, x(s.end) - x(s.start)), H));
 
   // Anomaly score against its threshold. This is what the scene-baseline
@@ -316,7 +264,7 @@ function drawTimeline() {
 
     if (useScore) {                              // dashed threshold line
       g.save(); g.setLineDash([4, 4]);
-      g.strokeStyle = 'rgba(248,81,73,.75)'; g.lineWidth = 1;
+      g.strokeStyle = '#ab3e30'; g.lineWidth = 1;
       g.beginPath(); g.moveTo(0, yOf(thr)); g.lineTo(W, yOf(thr)); g.stroke();
       g.restore();
     }
@@ -325,19 +273,21 @@ function drawTimeline() {
       const px = x(p.t), py = yOf(p[key]);
       i ? g.lineTo(px, py) : g.moveTo(px, py);
     });
-    g.strokeStyle = '#58a6ff'; g.lineWidth = 1.5; g.stroke();
+    g.strokeStyle = '#41677a'; g.lineWidth = 1.8; g.stroke();
 
     // grey out the warm-up stretch, where the detector cannot vote yet
     const wu = pts.filter(p => p.warming_up);
     if (wu.length) {
-      g.fillStyle = 'rgba(139,148,158,.20)';
+      g.fillStyle = 'rgba(104,117,112,.22)';
       g.fillRect(0, 0, x(wu[wu.length - 1].t), H);
     }
   }
 
   // playhead
   const t = $('player').currentTime || 0;
-  g.strokeStyle = '#fff'; g.lineWidth = 1.5;
+  cv.setAttribute('aria-valuenow', Math.round(t));
+  cv.setAttribute('aria-valuetext', fmt(t));
+  g.strokeStyle = '#192421'; g.lineWidth = 1.5;
   g.beginPath(); g.moveTo(x(t), 0); g.lineTo(x(t), H); g.stroke();
 }
 
@@ -347,6 +297,15 @@ cv.addEventListener('click', e => {
   const p = $('player');
   p.currentTime = ((e.clientX - rect.left) / rect.width) * (RESULT.duration || 0);
   p.play();
+});
+cv.addEventListener('keydown', e => {
+  if (!RESULT || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+  e.preventDefault();
+  const p = $('player');
+  if (e.key === 'Home') p.currentTime = 0;
+  else if (e.key === 'End') p.currentTime = RESULT.duration || 0;
+  else p.currentTime = Math.max(0, Math.min(RESULT.duration || 0, p.currentTime + (e.key === 'ArrowRight' ? 5 : -5)));
+  drawTimeline();
 });
 $('player').addEventListener('timeupdate', drawTimeline);
 $('player').addEventListener('seeked', drawTimeline);
@@ -375,7 +334,7 @@ function tile(room) {
   const el = document.createElement('div');
   el.className = 'cam'; el.id = 'cam-' + room;
   el.innerHTML = `
-    <div class="bar"><span class="name">📷 ${room} <span class="tag" id="kind-${room}"></span></span>
+    <div class="bar"><span class="name">${room} <span class="tag" id="kind-${room}"></span></span>
       <span class="badge" id="badge-${room}">NORMAL</span></div>
     <img src="/video/${room}" alt="${room} feed">
     <div class="meta">

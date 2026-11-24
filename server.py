@@ -623,6 +623,11 @@ def camera_page():
         return f.read()
 
 
+@app.get("/ui.css")
+def ui_styles():
+    return FileResponse(os.path.join(HERE, "ui.css"), media_type="text/css")
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     with open(os.path.join(HERE, "dashboard.html"), encoding="utf-8") as f:
